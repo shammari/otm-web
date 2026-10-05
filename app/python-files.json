@@ -1,0 +1,23 @@
+{
+ "files": [
+  "otm_core/__init__.py",
+  "otm_core/__main__.py",
+  "otm_core/edits.py",
+  "otm_core/export.py",
+  "otm_core/fem/__init__.py",
+  "otm_core/fem/mesh.py",
+  "otm_core/fem/mesh_triangle.py",
+  "otm_core/fem/solve.py",
+  "otm_core/figures.py",
+  "otm_core/flux.py",
+  "otm_core/geometry.py",
+  "otm_core/io.py",
+  "otm_core/models.py",
+  "otm_core/morphometry.py",
+  "otm_core/pipeline.py",
+  "otm_core/progress.py",
+  "otm_core/session.py",
+  "otm_core/tables.py",
+  "app/otm_web.py"
+ ]
+}

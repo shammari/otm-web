@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OTM Web</title>
+<meta name="description" content="Oxygen transport modelling of muscle tissue, in your browser. Your files never leave your computer.">
+<link rel="icon" href="app/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app/style.css">
+<script type="module" src="app/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"/><circle cx="16" cy="16" r="4.5" fill="currentColor"/></svg>
+    <div>
+      <h1>OTM Web</h1>
+      <p class="tagline">Oxygen transport in muscle tissue · runs in your browser, your files stay on your computer</p>
+    </div>
+  </div>
+  <div id="engine" class="engine" role="status" aria-live="polite">
+    <span class="dot"></span><span id="engine-text">Starting…</span>
+  </div>
+</header>
+
+<nav class="steps" aria-label="Steps">
+  <a href="#files" class="step-link"><b>1</b> Files</a>
+  <a href="#settings" class="step-link"><b>2</b> Settings</a>
+  <a href="#run" class="step-link"><b>3</b> Run</a>
+  <a href="#results" class="step-link"><b>4</b> Results</a>
+</nav>
+
+<main>
+<!-- ============================== 1 FILES ============================== -->
+<section id="files" class="card">
+  <h2><b>1</b> Files</h2>
+  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too.</p>
+  <label id="drop" class="drop" tabindex="0">
+    <input id="file-input" type="file" accept=".mat,.otm" multiple hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span><b>Drop files here</b> or click to choose</span>
+  </label>
+  <div class="table-wrap" id="file-table-wrap" hidden>
+    <table class="data" id="file-table">
+      <thead><tr>
+        <th>File</th><th class="num">Image (px)</th><th class="num">Capillaries</th><th class="num">Fibres</th>
+        <th>Fibre types</th><th class="num" title="Leave blank to use the size in Settings">Width (µm)</th>
+        <th class="num" title="Leave blank to use the size in Settings">Height (µm)</th><th>Check</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="row-actions" id="file-actions" hidden>
+    <label class="button ghost"><input type="file" id="dims-input" accept=".csv,.txt" hidden>Load dimensions CSV…</label>
+    <button class="ghost" id="clear-files" type="button">Remove all</button>
+    <span class="hint small">Dimensions CSV: a <code>file</code> column and <code>width_um</code> or <code>height_um</code> (optional ROI columns), as for the batch runner.</span>
+  </div>
+</section>
+
+<!-- ============================== 2 SETTINGS ============================== -->
+<section id="settings" class="card">
+  <div class="card-head">
+    <h2><b>2</b> Settings</h2>
+    <div class="row-actions">
+      <label class="button ghost"><input type="file" id="settings-input" accept=".json" hidden>Load settings…</label>
+      <button class="ghost" id="save-settings" type="button">Save settings</button>
+      <button class="ghost" id="reset-settings" type="button">Defaults</button>
+    </div>
+  </div>
+  <p class="hint">One set of settings for all files. Saved settings are the same JSON the desktop batch runner reads.</p>
+
+  <div class="grid">
+    <fieldset>
+      <legend>Tissue</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="tissue" value="skeletal" checked><span>Skeletal muscle</span></label>
+        <label><input type="radio" name="tissue" value="cardiac"><span>Cardiac muscle</span></label>
+      </div>
+      <label class="check" data-skeletal><input type="checkbox" id="use-types" checked> Use the stored fibre types (I, IIa, IIb)</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Tissue size</legend>
+      <div class="inline">
+        <select id="size-kind" aria-label="Side given"><option value="width">Width</option><option value="height">Height</option></select>
+        <input type="number" id="size-value" min="0" step="any" placeholder="e.g. 440" aria-label="Size in micrometres">
+        <span class="unit">µm</span>
+      </div>
+      <p class="hint small">Physical size of the image; the other side follows the image shape. Files with their own size in the table use that.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Region of interest</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="roi" value="default" checked><span>Central 60 %</span></label>
+        <label><input type="radio" name="roi" value="edges"><span>Edges in µm</span></label>
+      </div>
+      <div class="roi-grid" id="roi-edges" hidden>
+        <label>x from <input type="number" id="roi-x0" step="any"></label><label>to <input type="number" id="roi-x1" step="any"></label>
+        <label>y from <input type="number" id="roi-y0" step="any"></label><label>to <input type="number" id="roi-y1" step="any"></label>
+      </div>
+      <p class="hint small">Where supply indices and flux lines are evaluated.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Analysis</legend>
+      <select id="steps">
+        <option value="indices">Supply indices only</option>
+        <option value="indices,po2">Supply indices and PO₂</option>
+        <option value="indices,po2,flux" selected>Supply indices, PO₂ and flux lines</option>
+      </select>
+      <p class="hint small">PO₂ and flux lines take about 1 to 2 minutes per sample.</p>
+    </fieldset>
+
+    <fieldset class="wide">
+      <legend>Biophysical parameters</legend>
+      <div class="inline wrap">
+        <label>Preset <select id="preset"><option value="skeletal">Skeletal, resting</option><option value="cardiac">Cardiac, resting</option><option value="custom">Custom</option></select></label>
+        <label class="button ghost small"><input type="file" id="dat-input" accept=".dat,.txt,.csv" hidden>Load .dat…</label>
+        <button class="ghost small" id="save-dat" type="button">Save .dat</button>
+      </div>
+      <div class="params" id="params"></div>
+      <div class="inline wrap gap-top">
+        <label>Exercise level <select id="exercise"></select></label>
+        <label class="check" data-skeletal><input type="checkbox" id="non-uniform" checked> Fibre-type specific solubility and diffusivity</label>
+        <label data-skeletal>Differential extraction <input type="number" id="diff-extraction" min="0.1" max="10" step="0.1" value="1" class="short"></label>
+      </div>
+    </fieldset>
+
+    <fieldset class="wide">
+      <legend>Figures</legend>
+      <label class="check"><input type="checkbox" id="figures" checked> Write figures (text summaries and spreadsheets are always written)</label>
+      <div id="figure-options">
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="layout" value="publication" checked><span>Publication</span></label>
+          <label><input type="radio" name="layout" value="legacy"><span>Legacy MATLAB layout</span></label>
+        </div>
+        <div class="inline wrap gap-top">
+          <label id="width-label">Width <select id="fig-width"></select></label>
+          <span class="formats" id="formats" aria-label="File formats"></span>
+          <label>Resolution <select id="dpi"><option value="300">300 dpi</option><option value="600" selected>600 dpi</option><option value="1200">1200 dpi</option></select></label>
+          <label>Colour map <select id="colormap"><option>turbo</option><option>viridis</option><option>plasma</option><option>jet</option></select></label>
+        </div>
+        <div class="inline wrap gap-top">
+          <span class="label">PO₂ colour range</span>
+          <div class="seg" role="radiogroup">
+            <label><input type="radio" name="range" value="auto" checked><span>Automatic</span></label>
+            <label><input type="radio" name="range" value="fixed"><span>Fixed</span></label>
+          </div>
+          <span id="range-values" hidden><input type="number" id="range-lo" step="any" min="0" value="0" class="short" aria-label="Lowest PO2"> to <input type="number" id="range-hi" step="any" min="0" value="30" class="short" aria-label="Highest PO2"> mmHg</span>
+        </div>
+        <p class="hint small">A fixed range puts all samples on one colour scale so they can be compared.</p>
+      </div>
+    </fieldset>
+  </div>
+  <p id="settings-error" class="error" hidden></p>
+</section>
+
+<!-- ============================== 3 RUN ============================== -->
+<section id="run" class="card">
+  <div class="card-head">
+    <h2><b>3</b> Run</h2>
+    <div class="row-actions">
+      <button id="run-button" class="primary" type="button" disabled>Run</button>
+      <button id="stop-button" class="ghost" type="button" hidden>Stop</button>
+    </div>
+  </div>
+  <p class="hint" id="run-hint">Add files and give the tissue size to start.</p>
+  <ul class="progress-list" id="progress-list"></ul>
+</section>
+
+<!-- ============================== 4 RESULTS ============================== -->
+<section id="results" class="card">
+  <div class="card-head">
+    <h2><b>4</b> Results</h2>
+    <div class="row-actions">
+      <button id="zip-button" class="primary" type="button" disabled>Download all results (ZIP)</button>
+    </div>
+  </div>
+  <p class="hint" id="results-hint">Results appear here as each sample finishes. The ZIP holds, per sample, the INDICES and PO2 folders the desktop app writes, plus the batch summary spreadsheet.</p>
+  <div class="table-wrap" id="overview-wrap" hidden>
+    <table class="data" id="overview">
+      <thead><tr><th>Sample</th><th>Status</th><th class="num">Capillaries</th><th class="num">LCFR</th><th class="num">Tissue PO₂ (mmHg)</th><th class="num">Hypoxic (%)</th><th class="num">Time (s)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="sample-view"></div>
+</section>
+</main>
+
+<footer>
+  <p>OTM Web runs the same Python code as the OTM Lite desktop app (<span id="versions">…</span>). Nothing is uploaded: the analysis runs in this tab, and results exist only until you close it. <a href="https://github.com/shammari/otm-web">Source and licences</a>.</p>
+</footer>
+
+<template id="tpl-sample">
+  <article class="sample">
+    <div class="sample-head">
+      <h3 class="sample-name"></h3>
+      <span class="badge"></span>
+    </div>
+    <p class="sample-meta"></p>
+    <div class="errors"></div>
+    <div class="cols">
+      <div class="block block-indices">
+        <div class="block-head"><h4>Supply indices</h4><button class="ghost small copy" type="button">Copy table</button></div>
+        <table class="data compact"><thead><tr><th>Index</th><th class="num">Value</th><th>Unit</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="block block-po2">
+        <div class="block-head"><h4>PO₂ (mmHg)</h4><button class="ghost small copy" type="button">Copy table</button></div>
+        <p class="hypoxia" hidden></p>
+        <table class="data compact"><thead><tr><th>Compartment</th><th class="num">Mean</th><th class="num">SD</th><th class="num">Hypoxic (%)</th></tr></thead><tbody></tbody></table>
+        <div class="block-head gap-top"><h4>O₂ consumption (ml O₂ / ml / s)</h4><button class="ghost small copy" type="button">Copy table</button></div>
+        <table class="data compact mo2"><thead><tr><th>Compartment</th><th class="num">VO₂max</th><th class="num">Mean MO₂</th><th class="num">SD</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="block block-figures">
+      <div class="block-head"><h4>Figures</h4></div>
+      <div class="gallery"></div>
+    </div>
+    <details class="block files-list">
+      <summary>All files of this sample</summary>
+      <ul></ul>
+    </details>
+  </article>
+</template>
+</body>
+</html>
