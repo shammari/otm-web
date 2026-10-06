@@ -121,11 +121,13 @@
         <button class="ghost small" id="save-dat" type="button">Save .dat</button>
       </div>
       <div class="params" id="params"></div>
-      <div class="inline wrap gap-top">
-        <label>Exercise level <select id="exercise"></select></label>
-        <label class="check" data-skeletal><input type="checkbox" id="non-uniform" checked> Fibre-type specific solubility and diffusivity</label>
-        <label data-skeletal>Differential extraction <input type="number" id="diff-extraction" min="0.1" max="10" step="0.1" value="1" class="short"></label>
+      <div class="switch-row">
+        <label class="field">Exercise level <select id="exercise"></select></label>
+        <label class="field check" data-skeletal><input type="checkbox" id="non-uniform" checked> Fibre-type specific solubility and diffusivity</label>
+        <label class="field" data-skeletal>Differential extraction <input type="number" id="diff-extraction" min="0.1" max="10" step="0.1" value="1" class="short"></label>
       </div>
+      <p class="switch-summary" id="exercise-summary" aria-live="polite"></p>
+      <p class="warn-note" id="m0-note" role="note" hidden></p>
     </fieldset>
 
     <fieldset class="wide">

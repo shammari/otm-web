@@ -373,12 +373,47 @@ function markParams() {
   }
 }
 
+// display only: O2 -> O₂ and subscripted symbols (R_cap -> R<sub>cap</sub>, M0 -> M<sub>0</sub>);
+// the parameter names in saved settings and .dat files do not change
+const o2 = (text) => text.replace(/\bPO2\b/g, "PO₂").replace(/\bO2\b/g, "O₂");
+function symbolNodes(sym) {
+  let m = sym.match(/^([^_]+)_(.+)$/) || sym.match(/^([A-Za-z])(\d.*)$/);
+  return m ? [m[1], el("sub", { text: m[2] })] : [sym];
+}
+
+const LEVEL_NAMES = { resting: "Resting", low: "Low", moderate: "Moderate", high: "High" };
+const fmtNum = (v) => fmtParam(Number(v.toPrecision(4)));
+
+// what the exercise level does, from otm_core's own table (ModelSwitches), as the desktop shows it
+function updateExercise() {
+  if (!state.info) return;
+  const tissue = radio("tissue");
+  const level = $("#exercise").value || "resting";
+  const sw = state.info.exercise[tissue][level];
+  const box = $("#exercise-summary");
+  box.textContent = "";
+  box.append("Michaelis–Menten uptake: ", el("b", { text: sw.michaelis_menten ? "on" : "off" }),
+    " · Myoglobin facilitation: ", el("b", { text: sw.myoglobin ? "on" : "off" }),
+    " · O₂ demand × ", el("b", { text: fmtNum(sw.demand) }),
+    " · capillary permeability × ", el("b", { text: fmtNum(sw.permeability) }));
+  const note = $("#m0-note");
+  const m0 = num($("#p-M0") && $("#p-M0").value);
+  const preset = presetValues(tissue).M0;
+  const changed = m0 !== null && !Number.isNaN(m0) && Math.abs(m0 - preset) > 1e-9 * preset;
+  note.hidden = !(level !== "resting" && changed);
+  if (!note.hidden) {
+    const eff = Number((m0 * sw.demand).toPrecision(3)).toExponential().replace(/\.?0+e/, "e");
+    note.textContent = `M₀ is multiplied by ${fmtNum(sw.demand)} for ${LEVEL_NAMES[level]} exercise, so this run uses `
+      + `M₀ = ${eff} ml O₂ / ml / s. If ${fmtParam(m0)} is already an exercising value, enter the resting value instead.`;
+  }
+}
+
 function buildParamGrid() {
   const box = $("#params");
   box.textContent = "";
   for (const f of paramFields()) {
     box.append(el("label", { class: "param" },
-      el("span", { class: "what" }, `${f.label} (${f.symbol})`, el("small", { text: f.unit })),
+      el("span", { class: "what" }, `${o2(f.label)} (`, ...symbolNodes(f.symbol), ")", el("small", { text: o2(f.unit) })),
       el("input", { type: "text", inputmode: "decimal", id: `p-${f.name}`, spellcheck: "false",
         oninput: () => {
           const v = readParams();
@@ -521,6 +556,7 @@ function validate() {
   }
   const de = num($("#diff-extraction").value);
   if (radio("tissue") === "skeletal" && (de === null || de < 0.1 || de > 10)) msgs.push("differential extraction must be between 0.1 and 10");
+  updateExercise();
   const box = $("#settings-error");
   box.hidden = !msgs.length;
   box.textContent = msgs.length ? "Fix before running: " + msgs.join("; ") + "." : "";
@@ -554,6 +590,7 @@ function wireSettings() {
   $("#figures").addEventListener("change", () => { applyFigureOptions(); validate(); });
   for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction", "#size-value"]) $(id).addEventListener("input", validate);
   $("#size-kind").addEventListener("change", () => { validate(); refreshSizes(); });
+  $("#exercise").addEventListener("change", validate);
   $("#size-value").addEventListener("input", refreshSizes);
   $("#preset").addEventListener("change", () => {
     const p = $("#preset").value;
@@ -611,8 +648,12 @@ function updateRunState() {
   btn.textContent = files.length > 1 ? `Run ${files.length} files` : "Run";
   $("#stop-button").hidden = !state.running;
   $("#zip-button").disabled = state.running || state.results.size === 0;
-  $$(".step-link")[0].classList.toggle("done", files.length > 0);
-  $$(".step-link")[2].classList.toggle("done", state.results.size > 0);
+  const steps = $$(".step-link");
+  steps[0].classList.toggle("done", files.length > 0);
+  steps[1].classList.toggle("done", files.length > 0 && missingSize.length === 0 && $("#settings-error").hidden && engine.ready);
+  steps[2].classList.toggle("running", state.running);
+  steps[2].classList.toggle("done", !state.running && state.results.size > 0);
+  steps[3].classList.toggle("done", state.results.size > 0);
 }
 
 const STEP_LABELS = { load: "Reading the file", geometry: "Tissue size and region", indices: "Supply indices",
@@ -764,6 +805,7 @@ function selectSample(name) {
   if (res.mesh) meta.push(`mesh ${fmtInt(res.mesh.nodes)} nodes (${res.mesh.mesher})`);
   if (res.solve) meta.push(`${res.solve.converged ? "converged" : "NOT converged"} in ${res.solve.iterations} Newton iteration(s), PO₂ ${fmt(res.solve.po2_min_mmHg)}–${fmt(res.solve.po2_max_mmHg)} mmHg`);
   if (res.flux) meta.push(`flux lines from ${res.flux.capillaries_with_lines} of ${res.flux.seed_capillaries} ROI capillaries`);
+  if (res.switches && res.po2) meta.push(`exercise ${LEVEL_NAMES[res.switches.exercise] || res.switches.exercise}: O₂ demand × ${fmtNum(res.switches.demand)}`);
   if (res.corrections) meta.push(`${res.corrections} saved correction(s) applied`);
   if (res.seconds) meta.push(`${fmt(res.seconds, 0)} s`);
   $(".sample-meta", node).textContent = meta.join(" · ");
@@ -884,6 +926,16 @@ function start() {
     toast("The run stops after the current sample.");
   });
   $("#zip-button").addEventListener("click", downloadZip);
+  // highlight the step of the section in view
+  const links = Object.fromEntries($$(".step-link").map((a) => [a.getAttribute("href").slice(1), a]));
+  const seen = new Map();
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) seen.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0);
+    let best = null, ratio = 0;
+    for (const [id, r] of seen) if (r > ratio) { best = id; ratio = r; }
+    for (const [id, a] of Object.entries(links)) a.classList.toggle("current", id === best);
+  }, { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1], rootMargin: "-60px 0px -30% 0px" });
+  for (const id of Object.keys(links)) io.observe(document.getElementById(id));
   window.addEventListener("beforeunload", (e) => {
     if (state.running || state.results.size) { e.preventDefault(); e.returnValue = ""; }
   });

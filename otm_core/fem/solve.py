@@ -180,6 +180,10 @@ class DerivedParameters:
     Rcap: float         # capillary radius (ndim)
 
 
+EXERCISE_PERMEABILITY_FACTOR = 8.6
+"""Capillary permeability k is multiplied by this times the exercise level when exercising."""
+
+
 @dataclass
 class ModelSwitches:
     """Functional heterogeneity (SkeletalFunctionalHeterogeneity / Cardiac...)."""
@@ -205,6 +209,12 @@ class ModelSwitches:
                  "moderate": (True, True, 10), "high": (True, True, 20)}
         mm, mb, ex = table[level.lower()]
         return cls(mm, mb, ex, False, 1.0)
+
+    @property
+    def permeability_factor(self) -> float:
+        """Factor applied to the capillary permeability k (1 at rest)."""
+        ex = float(self.exercise_level)
+        return 1.0 if ex == 1 else EXERCISE_PERMEABILITY_FACTOR * ex
 
 
 @dataclass
@@ -232,7 +242,7 @@ def compartment_coefficients(mesh: TissueMesh, params: DerivedParameters, switch
     r4 = matlab_f4 if legacy_rounding else float
     rn = matlab_num2str if legacy_rounding else float
     ex = float(switches.exercise_level)
-    kappa = params.kappa if ex == 1 else 8.6 * ex * params.kappa
+    kappa = params.kappa if ex == 1 else EXERCISE_PERMEABILITY_FACTOR * ex * params.kappa
     pMb = params.p50_Mb
     beta = params.beta * pMb ** 2
     comp = mesh.cell_compartment()

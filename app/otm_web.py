@@ -78,6 +78,8 @@ def info() -> str:
     from otm_core.pipeline import EXERCISE_LEVELS, STEPS, RunSettings
 
     TP = fem_solve.TransportParameters
+    exercise = {t: {lv: _switch_info(getattr(fem_solve.ModelSwitches, t)(lv)) for lv in EXERCISE_LEVELS}
+                for t in ("skeletal", "cardiac")}
     names = [f.name for f in dataclasses.fields(TP)]
     fields = [{"name": n, "label": d[0], "symbol": d[1], "unit": d[2]} for n, d in zip(names, TP.DESCRIPTIONS)]
     defaults = {t: dict(zip(names, v)) for t, v in TP.DEFAULTS.items()}
@@ -90,10 +92,17 @@ def info() -> str:
         "parameters": {"fields": fields, "defaults": defaults},
         "settings": RunSettings().to_dict(),
         "exercise_levels": list(EXERCISE_LEVELS),
+        "exercise": exercise,
         "steps": list(STEPS),
         "widths": WIDTH_LABELS,
         "formats": list(FORMATS),
     })
+
+
+def _switch_info(sw: Any) -> Dict[str, Any]:
+    """What an exercise level does (otm_core.fem.ModelSwitches): the multipliers the solver applies."""
+    return {"michaelis_menten": bool(sw.michaelis_menten), "myoglobin": bool(sw.myoglobin),
+            "demand": float(sw.exercise_level), "permeability": float(sw.permeability_factor)}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -207,6 +216,7 @@ def run(name: str, settings_json: str, progress: Callable[[float, str], Any]) ->
                            "errors": [{"step": k, "message": _plain_message(k, v)} for k, v in r.errors.items()],
                            "timings": r.timings, "corrections": len(r.edits),
                            "corrections_skipped": list(r.edit_warnings)}
+    out["switches"] = {"tissue": s.tissue, "exercise": s.exercise, **_switch_info(s.switches())}
     g = r.geometry
     if g is not None:
         ls = g.length_scale

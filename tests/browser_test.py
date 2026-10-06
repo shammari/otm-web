@@ -133,6 +133,42 @@ def main() -> int:
         check(page.input_value("#p-Pcap") == "30" and page.input_value("#range-hi") == "32",
               "settings JSON loaded back")
         page.uncheck('#formats input[value="svg"]')
+        check(set(saved["parameters"]) == {"r_um", "Pcap", "P50_Mb", "P_c", "alpha", "D", "D_Mb", "M0", "c_Mb", "k"},
+              "saved parameter names unchanged by the new labels")
+
+        print("3b exercise summary, labels, layout")
+        summ = page.inner_text("#exercise-summary")
+        check("O₂ demand × 1" in summ and "Michaelis–Menten uptake: off" in summ, f"resting summary ({summ})")
+        page.select_option("#exercise", "high")
+        summ = page.inner_text("#exercise-summary")
+        check("O₂ demand × 6" in summ and "permeability × 51.6" in summ and "Myoglobin facilitation: on" in summ,
+              f"high-exercise summary ({summ})")
+        check(page.is_hidden("#m0-note"), "no M0 note while M0 is the preset value")
+        page.fill("#p-M0", "3e-4")
+        note = page.inner_text("#m0-note")
+        check(page.is_visible("#m0-note") and "1.8e-3" in note, f"effective-M0 note ({note})")
+        page.check('input[name="tissue"][value="cardiac"]', force=True)
+        summ = page.inner_text("#exercise-summary")
+        check("O₂ demand × 20" in summ, f"cardiac high summary ({summ})")
+        page.check('input[name="tissue"][value="skeletal"]', force=True)
+        page.select_option("#exercise", "resting")
+        page.select_option("#preset", "skeletal")
+        check(page.is_hidden("#m0-note") and page.input_value("#p-M0") == "1.57e-4", "back to resting and the preset")
+        subs = page.locator("#params sub").count()
+        labels = page.inner_text("#params")
+        check(subs >= 7 and "O₂ solubility" in labels and "O2" not in labels, f"subscripted labels ({subs} subscripts)")
+        geo = page.evaluate("""() => {
+            const r = (s) => document.querySelector(s).getBoundingClientRect();
+            const ex = r('#exercise'), cb = r('#non-uniform'), cbl = document.querySelector('#non-uniform').closest('label').getBoundingClientRect(), de = r('#diff-extraction').left;
+            const del = document.querySelector('#diff-extraction').closest('label').getBoundingClientRect();
+            return {dy: Math.abs((ex.top + ex.bottom) / 2 - (cb.top + cb.bottom) / 2),
+                    dyText: Math.abs((ex.top + ex.bottom) / 2 - (cbl.top + cbl.bottom) / 2),
+                    gap: del.left - cbl.right, sameRow: Math.abs(del.top - cbl.top) < 20}; }""")
+        check(geo["dy"] <= 2 and geo["dyText"] <= 2, f"checkbox and its text centred on the exercise level ({geo})")
+        check(not geo["sameRow"] or geo["gap"] >= 28, f"space before differential extraction ({geo['gap']:.0f} px)")
+        steps = page.evaluate("[...document.querySelectorAll('.step-link')].map(a => a.classList.contains('done'))")
+        check(steps == [True, True, False, False], f"step bar before the run {steps}")
+        page.locator("fieldset.wide").first.screenshot(path=str(out / "parameters.png"))
         page.screenshot(path=str(out / "page_before_run.png"), full_page=True)
 
         print("4  run (2 samples)")
@@ -141,6 +177,8 @@ def main() -> int:
         page.wait_for_function("window.__otm.state.running === true", timeout=60_000)
         page.wait_for_function("window.__otm.state.running === false", timeout=1_500_000, polling=2000)
         print(f"    run took {time.time() - t0:.0f} s")
+        steps = page.evaluate("[...document.querySelectorAll('.step-link')].map(a => a.classList.contains('done'))")
+        check(steps == [True, True, True, True], f"step bar after the run {steps}")
         res = page.evaluate("Object.fromEntries(window.__otm.state.results)")
         check(len(res) == 2 and all(r["ok"] for r in res.values()), "both samples ran without errors")
         for name, r in res.items():
@@ -154,6 +192,7 @@ def main() -> int:
             check(rel < 2e-3, f"{k} mean PO2 {po2[k]:.2f} vs MATLAB {v:.3f} (rel {rel:.1e})")
         lcfr = r["summary"]["LCFR_mean"]
         check(abs(lcfr - base["key_metrics"]["mean_LCFR"]) < 1e-6, f"LCFR {lcfr:.6f} = MATLAB")
+        check("exercise Resting: O₂ demand × 1" in page.inner_text(".sample-meta"), "run summary names the exercise level")
         r2 = res["copy_by_height"]
         check(abs(r2["size_um"][0] - 440) < 0.5 and abs(r2["size_um"][1] - 330) < 0.5, "per-file height gives 440 x 330 µm")
         check(r2["po2"] == r["po2"], "same data, same PO2 table")
