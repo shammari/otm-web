@@ -11,6 +11,75 @@ const WHEELS = ["scikit_fem-12.0.2-py3-none-any.whl", "openpyxl-3.1.5-py2.py3-no
                 "et_xmlfile-2.0.0-py3-none-any.whl"];
 const PACKAGES = ["numpy", "scipy", "shapely", "matplotlib", "h5py", "micropip"];
 
+// ---- download cache ---------------------------------------------------------------------------
+// Python and its packages (about 45 MB) are kept in the browser's Cache Storage under a name tied
+// to the Pyodide version, so they are downloaded once, not again after every update of the site
+// (GitHub Pages changes every file's cache tag on each publish). The bytes received are counted so
+// the page can show download progress.
+const PYODIDE_VERSION = "314.0.7";
+const CACHE = `otm-python-${PYODIDE_VERSION}`;
+const CACHED = /\/(pyodide|wheels)\/[^/]+$/;
+const netFetch = globalThis.fetch.bind(globalThis);
+let downloaded = 0, fromCache = 0, lastReport = 0;
+
+function reportDownload(force = false) {
+  const now = performance.now();
+  if (!force && now - lastReport < 250) return;
+  lastReport = now;
+  postMessage({ type: "download", downloaded, fromCache });
+}
+
+async function countedBody(resp) {
+  if (!resp.body) return resp;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    downloaded += value.byteLength;
+    reportDownload();
+  }
+  const headers = new Headers(resp.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  return new Response(new Blob(chunks), { status: resp.status, statusText: resp.statusText, headers });
+}
+
+async function cachedFetch(input, init) {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!CACHED.test(new URL(url, self.location.href).pathname)) return netFetch(input, init);
+  let cache = null;
+  try { cache = await caches.open(CACHE); } catch { /* private window etc.: plain download */ }
+  if (cache) {
+    try {
+      const hit = await cache.match(url);
+      if (hit) { fromCache += Number(hit.headers.get("x-otm-bytes") || 0); reportDownload(); return hit; }
+    } catch { /* fall through to the network */ }
+  }
+  const resp = await netFetch(input, init);
+  if (!resp.ok) return resp;
+  const full = await countedBody(resp);
+  if (cache) {
+    try {
+      const copy = full.clone();
+      const headers = new Headers(copy.headers);
+      const blob = await copy.blob();
+      headers.set("x-otm-bytes", String(blob.size));
+      await cache.put(url, new Response(blob, { status: full.status, statusText: full.statusText, headers }));
+    } catch { /* storage full or refused: still works, just downloads again next time */ }
+  }
+  return full;
+}
+
+async function dropOldCaches() {
+  try {
+    for (const k of await caches.keys()) if (k.startsWith("otm-python-") && k !== CACHE) await caches.delete(k);
+  } catch { /* no Cache Storage */ }
+}
+
+globalThis.fetch = cachedFetch;
+
 let py = null;        // the Pyodide instance
 let web = null;       // the otm_web Python module
 const status = (text) => postMessage({ type: "status", text });
@@ -52,7 +121,8 @@ async function writePythonFiles() {
 
 async function init() {
   const t0 = performance.now();
-  status("Loading Python (first visit: about 45 MB, then cached)…");
+  dropOldCaches();
+  status("Loading Python…");
   py = await loadPyodide({ indexURL: here("../pyodide/") });
   status("Loading the mesher…");
   await Triangle.init(here("triangle.wasm"));
@@ -61,6 +131,7 @@ async function init() {
   status("Loading scikit-fem and openpyxl…");
   const micropip = py.pyimport("micropip");
   await micropip.install(WHEELS.map((w) => here("../wheels/" + w)), { deps: false });
+  reportDownload(true);
   status("Loading OTM…");
   const root = await writePythonFiles();
   py.registerJsModule("otm_triangle_js", { triangulate });

@@ -69,7 +69,8 @@ def main() -> int:
     t_all = time.time()
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 1280, "height": 900}, accept_downloads=True)
+        context = browser.new_context(viewport={"width": 1280, "height": 900}, accept_downloads=True)
+        page = context.new_page()
         page.on("pageerror", lambda e: FAILS.append(f"page error: {e}") or print("  page error:", e))
         page.on("console", lambda m: m.type == "error" and print("  console:", m.text[:300]))
         page.goto(f"http://127.0.0.1:{a.port}/index.html")
@@ -77,6 +78,8 @@ def main() -> int:
         print("1  engine")
         page.wait_for_selector("#engine.ready", timeout=240_000)
         print("   ", page.inner_text("#engine-text"), "|", page.inner_text("#versions"))
+        dl = page.evaluate("({...window.__otm.download})")
+        check(dl["bytes"] > 30e6, f"first visit downloads Python ({dl['bytes'] / 1e6:.0f} MB, counted for the progress text)")
         check(page.locator("#params input").count() == 10, "10 parameter fields")
 
         print("2  files")
@@ -89,18 +92,25 @@ def main() -> int:
         check([f["status"] for f in files] == ["ok", "ok", "bad"], "two readable files, the broken one flagged")
         check("left out" in page.inner_text("#file-table"), "unreadable file says it is left out")
         check(page.is_disabled("#run-button"), "Run disabled until the size is given")
-        # second file: its own height (sample is 440 x 330 µm)
-        page.locator('#file-table input[aria-label^="height of copy_by_height"]').fill("330")
+        check(page.locator("#size-value").count() == 0, "tissue size asked in one place only (the file table)")
+        # sample is 440 x 330 µm: type the width once, give it to every file, then one file by its height
+        page.locator('#file-table input[aria-label^="width of sample"]').fill("440")
+        h1 = page.locator('#file-table input[aria-label^="height of sample"]')
+        check(h1.input_value() == "330", f"height calculated from the typed width ({h1.input_value()})")
+        page.locator('#file-table tr[data-name="sample"] button.apply-all').click()
+        h2 = page.locator('#file-table input[aria-label^="height of copy_by_height"]')
+        check(h2.input_value() == "330", "Same for all gives the other file the width and its own calculated height")
+        h2.fill("330")
         w2 = page.locator('#file-table input[aria-label^="width of copy_by_height"]')
         check(w2.input_value() == "440", f"width calculated from the typed height ({w2.input_value()})")
-        page.fill("#size-value", "440")
-        h1 = page.locator('#file-table input[aria-label^="height of sample"]')
-        check(h1.get_attribute("placeholder") == "330", "the settings width shows the calculated height in the table")
-        check("sample: 440 × 330 µm" in page.inner_text("#size-derived"), "settings show the calculated size")
         w2.fill("440")
-        check(page.locator('#file-table input[aria-label^="height of copy_by_height"]').input_value() == "330",
-              "typing the other side recalculates the first instead of clearing it")
-        page.locator('#file-table input[aria-label^="height of copy_by_height"]').fill("330")
+        check(h2.input_value() == "330", "typing the other side recalculates the first instead of clearing it")
+        h2.fill("330")
+        with page.expect_download() as dd:
+            page.click("#save-dims")
+        dims = dd.value.path().read_text().splitlines()
+        check(len(dims) == 3 and dims[1].startswith("sample.mat,440,") and dims[2].startswith("copy_by_height.mat,,330"),
+              f"dimensions CSV saved ({dims[1:]})")
         check(page.is_enabled("#run-button"), "Run enabled with sizes")
 
         print("3  settings round trip")
@@ -111,7 +121,6 @@ def main() -> int:
         dat = d.value.path().read_text().split()
         check(len(dat) == 10 and float(dat[1]) == 35.0, ".dat saved with 10 values")
         page.click("#reset-settings")
-        page.fill("#size-value", "440")
         check(page.input_value("#p-Pcap") == "30", "defaults restore P_cap 30")
         page.set_input_files("#dat-input", str(d.value.path()))
         page.wait_for_function("document.querySelector('#p-Pcap').value === '35'")
@@ -124,7 +133,7 @@ def main() -> int:
         with page.expect_download() as d:
             page.click("#save-settings")
         saved = json.loads(d.value.path().read_text())
-        check(saved["width_um"] == 440 and saved["po2_range_mmHg"] == [0, 32] and "svg" in saved["figure_formats"],
+        check(saved["width_um"] is None and saved["po2_range_mmHg"] == [0, 32] and "svg" in saved["figure_formats"],
               "settings JSON has the form's values")
         page.check('input[name="tissue"][value="cardiac"]', force=True)
         check(page.input_value("#p-Pcap") == "40", "cardiac preset (P_cap 40)")
@@ -233,7 +242,7 @@ def main() -> int:
             summary = z.read("OTM_batch_summary.csv").decode("utf-8-sig").splitlines()
             check(len(summary) == 3, "summary CSV has a row per sample")
             st = json.loads(z.read("OTM_batch_settings.json"))
-            check(st["width_um"] == 440 and st["po2_range_mmHg"] == [0, 32], "settings JSON in the ZIP")
+            check(st["po2_range_mmHg"] == [0, 32], "settings JSON in the ZIP")
         print(f"    ZIP {zpath.stat().st_size / 1e6:.1f} MB, {len(names)} files")
 
         print("7  hypoxia display (a made-up result)")
@@ -244,6 +253,14 @@ def main() -> int:
         check(page.locator(".block-po2 tr.hypoxic").count() == 2, "hypoxic rows in the warning colour")
         check(page.is_visible(".hypoxia") and "HYPOXIA" in page.inner_text(".hypoxia"), "hypoxia tag shown")
         page.locator(".sample").screenshot(path=str(out / "hypoxia_demo.png"))
+        print("8  second visit loads Python from the browser's cache")
+        p2 = context.new_page()
+        t1 = time.time()
+        p2.goto(f"http://127.0.0.1:{a.port}/index.html")
+        p2.wait_for_selector("#engine.ready", timeout=240_000)
+        dl2 = p2.evaluate("({...window.__otm.download})")
+        check(dl2["bytes"] < 1e6 and dl2["fromCache"] > 30e6,
+              f"nothing downloaded again ({dl2['bytes'] / 1e6:.1f} MB; {dl2['fromCache'] / 1e6:.0f} MB from cache, ready in {time.time() - t1:.0f} s)")
         browser.close()
     srv.shutdown()
     print(f"\n{'PASSED' if not FAILS else 'FAILED'} in {time.time() - t_all:.0f} s"

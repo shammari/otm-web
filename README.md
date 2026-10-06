@@ -9,13 +9,13 @@ OTM Web models oxygen transport in muscle tissue, in a web browser. It runs the 
 ## Using it
 
 1. **Files:** drop one or more `.mat` exports onto the page. Each file is checked on arrival, showing its image size, capillaries, fibres and fibre types. To apply corrections made in the desktop app, also add its `.otm` session with the same name.
-2. **Settings:** tissue type, tissue width or height in µm, region of interest, biophysical parameters and exercise level, analysis steps, and figure style.
-   - Sizes can be given per file in the file table, or loaded from a dimensions CSV.
+   - In the file table, type each image's width or height in µm; the other side is calculated from the image shape. **Same for all** copies one file's size to the rest, and sizes can be loaded from or saved to a dimensions CSV.
+2. **Settings:** tissue type, region of interest, biophysical parameters and exercise level, analysis steps, and figure style.
    - Settings save and load as the same JSON the desktop batch runner (`python -m otm_core run --settings`) reads.
 3. **Run:** samples run one after another, with progress for each. A whole sample with figures takes about 1.5 minutes.
 4. **Results:** a row per sample, then for the selected sample its tables (hypoxic compartments in coral) and figures. **Download all results (ZIP)** holds, per sample, the `INDICES` and `PO2` folders exactly as the desktop app writes them, plus `OTM_batch_summary.xlsx`/`.csv` and the settings.
 
-The first visit downloads about 45 MB (Python and its scientific libraries). The browser keeps it for later visits.
+The first visit downloads about 45 MB (Python and its scientific libraries); the top-right corner shows how far it has got. The browser keeps it, so later visits (also after the site is updated) start in about 10 seconds.
 
 **Browsers:** current Chrome, Edge or Firefox on a computer. Safari 17+ should work but is not tested yet. Phones are not supported.
 
@@ -61,4 +61,3 @@ The repository is the website; nothing needs building.
 ## Licences
 
 See [NOTICE.md](NOTICE.md). **Triangle is free for non-commercial use only,** so OTM Web must not be used or offered commercially without a licence from its author.
-

@@ -54,6 +54,7 @@ class Engine {
     this.nextId = 1;
     this.onStatus = () => {};
     this.onProgress = () => {};
+    this.onDownload = () => {};
     this.worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
     this.worker.onmessage = ({ data }) => this._message(data);
     this.worker.onerror = (e) => {
@@ -67,6 +68,7 @@ class Engine {
   }
   _message(data) {
     if (data.type === "status") return this.onStatus(data.text, "loading");
+    if (data.type === "download") return this.onDownload(data);
     if (data.type === "progress") return this.onProgress(data);
     const p = this.pending.get(data.id);
     if (!p) return;
@@ -104,7 +106,23 @@ const state = {
 };
 
 const engine = new Engine();
-engine.onStatus = (text, kind) => setEngine(text, kind);
+// first visit (or after a Pyodide upgrade) Python is downloaded: show how far, instead of a
+// status that seems frozen; later visits load it from the browser's cache in a few seconds
+const TOTAL_MB = 45;
+const pyDownload = { bytes: 0, fromCache: 0, active: true };
+engine.onDownload = (d) => {
+  pyDownload.bytes = d.downloaded;
+  pyDownload.fromCache = d.fromCache;
+  if (pyDownload.active && d.downloaded > 5e5) {
+    const mb = d.downloaded / 1e6;
+    setEngine(`Downloading Python, first time only: ${mb.toFixed(0)} of about ${TOTAL_MB} MB…`, "loading");
+  }
+};
+engine.onStatus = (text, kind) => {
+  if (text.startsWith("Loading OTM") || kind !== "loading") pyDownload.active = false;
+  if (pyDownload.active && pyDownload.bytes > 5e5) return;      // keep showing the download progress
+  setEngine(text, kind);
+};
 engine.onProgress = (p) => updateProgress(p.name, p.f, p.msg);
 
 function setEngine(text, kind) {
@@ -130,7 +148,8 @@ function addFiles(list) {
     const ext = extOf(file.name);
     if (ext === ".mat") {
       const entry = { name: uniqueName(stemOf(file.name)), stem: stemOf(file.name), mat: file, otm: null,
-                      check: null, status: "waiting", error: null, given: null, value: "", roi: null, corrections: null };
+                      check: null, status: "waiting", error: null, given: state.defaultSize ? state.defaultSize.given : null,
+                      value: state.defaultSize ? state.defaultSize.value : "", roi: null, corrections: null };
       const orphan = state.orphanOtm.get(entry.stem.toLowerCase());
       if (orphan) { entry.otm = orphan; state.orphanOtm.delete(entry.stem.toLowerCase()); }
       state.files.push(entry);
@@ -184,9 +203,23 @@ async function checkFile(entry) {
 function fileSize(entry) {
   const own = num(entry.value);
   if (entry.given && own > 0) return entry.given === "width" ? { width_um: own, height_um: null } : { width_um: null, height_um: own };
-  const v = num($("#size-value").value);
-  if (v && v > 0) return $("#size-kind").value === "width" ? { width_um: v, height_um: null } : { width_um: null, height_um: v };
   return null;
+}
+
+// the size all runnable files share (saved as width_um / height_um in the settings JSON), else null
+function commonSize() {
+  const files = runnable();
+  if (!files.length || files.some((f) => !fileSize(f))) return null;
+  const first = files[0];
+  return files.every((f) => f.given === first.given && num(f.value) === num(first.value)) ? fileSize(first) : null;
+}
+
+function applySizeToAll(src) {
+  const others = state.files.filter((f) => f !== src && f.status !== "bad");
+  for (const f of others) { f.given = src.given; f.value = src.value; showSize(f); }
+  updateRunState();
+  toast(`${src.given === "width" ? "Width" : "Height"} ${src.value} µm given to ${others.length} other file(s); `
+    + "the other side is calculated for each image.");
 }
 
 // width / height of the image (as LengthScale: the other side follows the image's pixel shape)
@@ -214,26 +247,16 @@ function showSize(f) {
       inp.title = "Calculated from the image shape; type here to give this side instead";
     } else {
       inp.value = "";
-      inp.placeholder = v || "–";
+      inp.placeholder = "–";
       inp.classList.remove("derived");
-      inp.title = v ? "From the size in Settings; type here to give this file its own size" : "Type the width or the height of this image";
+      inp.title = "Type the width or the height of this image in µm";
     }
   }
-}
-
-function showGlobalSize() {
-  const box = $("#size-derived");
-  const ok = state.files.filter((f) => f.status === "ok" && !(f.given && num(f.value) > 0));
-  const v = num($("#size-value").value);
-  const lines = v > 0 ? ok.slice(0, 3).map((f) => { const wh = sizeOf(f); return wh ? `${f.name}: ${fmtUm(wh[0])} × ${fmtUm(wh[1])} µm` : null; }).filter(Boolean) : [];
-  if (ok.length > 3 && lines.length) lines.push(`… and ${ok.length - 3} more`);
-  box.textContent = lines.join(" · ");
-  box.hidden = !lines.length;
+  if (f._apply) f._apply.hidden = !(own && state.files.filter((x) => x.status !== "bad").length > 1);
 }
 
 function refreshSizes() {
   for (const f of state.files) showSize(f);
-  showGlobalSize();
 }
 
 function renderFiles() {
@@ -256,12 +279,14 @@ function renderFiles() {
           else return;                      // a calculated side was emptied: keep the given one
 
           showSize(f);
-          showGlobalSize();
           updateRunState();
         },
       });
     }
     f._inputs = inputs;
+    f._apply = el("button", { class: "ghost small apply-all", type: "button", hidden: true,
+      title: "Give every file this side; the other side is calculated for each image",
+      onclick: () => applySizeToAll(f) }, "Same for all");
     let check;
     if (f.status === "checking" || f.status === "waiting") check = el("span", { class: "hint small", text: f.status === "waiting" ? "waiting…" : "checking…" });
     else if (f.status === "ok") {
@@ -279,6 +304,7 @@ function renderFiles() {
       el("td", { class: "nowrap", text: types }),
       el("td", { class: "num" }, inputs.width),
       el("td", { class: "num" }, inputs.height),
+      el("td", {}, f._apply),
       el("td", {}, check),
       el("td", {}, el("button", { class: "remove", type: "button", title: `Remove ${f.name}`, "aria-label": `Remove ${f.name}`,
         onclick: () => removeFile(f) }, "×")),
@@ -311,6 +337,17 @@ function setupFiles() {
     state.files = [];
     state.orphanOtm.clear();
     renderFiles();
+  });
+  $("#save-dims").addEventListener("click", () => {
+    const rows = state.files.filter((f) => fileSize(f));
+    if (!rows.length) return toast("No sizes to save yet: type a width or height in the table.", true);
+    const q = (v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+    const lines = ["file,width_um,height_um,roi_x_min_um,roi_x_max_um,roi_y_min_um,roi_y_max_um"];
+    for (const f of rows) {
+      const sz = fileSize(f);
+      lines.push([q(f.mat.name), sz.width_um ?? "", sz.height_um ?? "", ...(f.roi || ["", "", "", ""])].join(","));
+    }
+    download(new Blob([lines.join("\r\n") + "\r\n"], { type: "text/csv" }), "OTM_dimensions.csv");
   });
   $("#dims-input").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -444,13 +481,13 @@ function applyFigureOptions() {
 
 function settingsFromForm() {
   const steps = $("#steps").value.split(",");
-  const size = num($("#size-value").value);
+  const size = commonSize();
   const s = {
     ...state.extras,
     tissue: radio("tissue"),
     use_fibre_types: $("#use-types").checked,
-    width_um: $("#size-kind").value === "width" && size ? size : null,
-    height_um: $("#size-kind").value === "height" && size ? size : null,
+    width_um: size ? size.width_um : null,
+    height_um: size ? size.height_um : null,
     roi_um: radio("roi") === "edges" ? ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1"].map((id) => num($(id).value)) : null,
     parameters: state.info ? readParams() : null,
     exercise: $("#exercise").value || "resting",
@@ -478,16 +515,17 @@ function formToDefaults() {
   const d = state.info.settings;
   state.extras = {};
   fillForm({ ...d, parameters: null });
-  $("#size-value").value = "";
-  $("#size-kind").value = "width";
+  state.defaultSize = null;
 }
 
 function fillForm(d) {
   setRadio("tissue", d.tissue || "skeletal");
   $("#use-types").checked = d.use_fibre_types !== false;
-  if (d.width_um) { $("#size-kind").value = "width"; $("#size-value").value = d.width_um; }
-  else if (d.height_um) { $("#size-kind").value = "height"; $("#size-value").value = d.height_um; }
-  else $("#size-value").value = "";
+  // a size in the settings JSON goes to every file that has none yet (and to files added later)
+  if (d.width_um || d.height_um) {
+    state.defaultSize = d.width_um ? { given: "width", value: String(d.width_um) } : { given: "height", value: String(d.height_um) };
+    for (const f of state.files) if (!fileSize(f)) { f.given = state.defaultSize.given; f.value = state.defaultSize.value; }
+  }
   if (d.roi_um) {
     setRadio("roi", "edges");
     ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1"].forEach((id, i) => { $(id).value = d.roi_um[i]; });
@@ -588,10 +626,8 @@ function wireSettings() {
   });
   for (const r of $$('input[name="range"]')) r.addEventListener("change", () => { applyFigureOptions(); validate(); });
   $("#figures").addEventListener("change", () => { applyFigureOptions(); validate(); });
-  for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction", "#size-value"]) $(id).addEventListener("input", validate);
-  $("#size-kind").addEventListener("change", () => { validate(); refreshSizes(); });
+  for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction"]) $(id).addEventListener("input", validate);
   $("#exercise").addEventListener("change", validate);
-  $("#size-value").addEventListener("input", refreshSizes);
   $("#preset").addEventListener("change", () => {
     const p = $("#preset").value;
     if (p !== "custom") writeParams(presetValues(p));
@@ -639,7 +675,7 @@ function updateRunState() {
   else if (!state.files.length) hint = "Add files to start.";
   else if (checking) hint = "Checking the files…";
   else if (!files.length) hint = "None of the files can be read.";
-  else if (missingSize.length) hint = `Give the tissue size in Settings (or in the file table) for: ${missingSize.map((f) => f.name).join(", ")}.`;
+  else if (missingSize.length) hint = `Type the width or the height in the file table for: ${missingSize.map((f) => f.name).join(", ")}.`;
   else if (!$("#settings-error").hidden) hint = "Fix the settings first.";
   else hint = `${files.length} file(s) ready.` + (state.files.length > files.length ? ` ${state.files.length - files.length} unreadable file(s) will be left out.` : "");
   if (state.running) hint = "Running… you can keep using this tab; leaving the page stops the run.";
@@ -960,4 +996,4 @@ if (typeof Worker === "undefined" || typeof WebAssembly === "undefined") {
 } else start();
 
 // for the browser test
-window.__otm = { state, engine, storeResult, selectSample };
+window.__otm = { state, engine, storeResult, selectSample, download: pyDownload };

@@ -34,7 +34,7 @@
 <!-- ============================== 1 FILES ============================== -->
 <section id="files" class="card">
   <h2><b>1</b> Files</h2>
-  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too. Type a file's width <i>or</i> height to give it its own size; the other side is calculated from the image shape.</p>
+  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too. For each file type the width <i>or</i> the height of the image in µm; the other side is calculated from the image shape. With several files of the same size, type it once and click <b>Same for all</b>.</p>
   <label id="drop" class="drop" tabindex="0">
     <input id="file-input" type="file" accept=".mat,.otm" multiple hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -44,14 +44,15 @@
     <table class="data" id="file-table">
       <thead><tr>
         <th>File</th><th class="num">Image (px)</th><th class="num">Capillaries</th><th class="num">Fibres</th>
-        <th>Fibre types</th><th class="num" title="Leave blank to use the size in Settings">Width (µm)</th>
-        <th class="num" title="Leave blank to use the size in Settings">Height (µm)</th><th>Check</th><th></th>
+        <th>Fibre types</th><th class="num">Width (µm)</th>
+        <th class="num">Height (µm)</th><th></th><th>Check</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
   </div>
   <div class="row-actions" id="file-actions" hidden>
     <label class="button ghost"><input type="file" id="dims-input" accept=".csv,.txt" hidden>Load dimensions CSV…</label>
+    <button class="ghost" id="save-dims" type="button">Save dimensions CSV</button>
     <button class="ghost" id="clear-files" type="button">Remove all</button>
     <span class="hint small">Dimensions CSV: a <code>file</code> column and <code>width_um</code> or <code>height_um</code> (optional ROI columns), as for the batch runner.</span>
   </div>
@@ -79,16 +80,6 @@
       <label class="check" data-skeletal><input type="checkbox" id="use-types" checked> Use the stored fibre types (I, IIa, IIb)</label>
     </fieldset>
 
-    <fieldset>
-      <legend>Tissue size</legend>
-      <div class="inline">
-        <select id="size-kind" aria-label="Side given"><option value="width">Width</option><option value="height">Height</option></select>
-        <input type="number" id="size-value" min="0" step="any" placeholder="e.g. 440" aria-label="Size in micrometres">
-        <span class="unit">µm</span>
-      </div>
-      <p class="hint small derived-line" id="size-derived" hidden></p>
-      <p class="hint small">Give one side; the other follows the image shape. A size typed in the file table overrides this for that file.</p>
-    </fieldset>
 
     <fieldset>
       <legend>Region of interest</legend>
@@ -168,7 +159,7 @@
       <button id="stop-button" class="ghost" type="button" hidden>Stop</button>
     </div>
   </div>
-  <p class="hint" id="run-hint">Add files and give the tissue size to start.</p>
+  <p class="hint" id="run-hint">Add files and give each its width or height to start.</p>
   <ul class="progress-list" id="progress-list"></ul>
 </section>
 

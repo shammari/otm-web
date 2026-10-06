@@ -111,7 +111,6 @@ input[type=number] { width: 110px; font-variant-numeric: tabular-nums; }
 input.short { width: 76px; }
 input:invalid, input.bad { border-color: var(--warning); }
 input.derived { color: var(--muted); font-style: italic; border-style: dashed; }
-.derived-line { color: var(--accent); margin: 8px 0 0; }
 input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
 .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .inline { display: flex; gap: 10px; align-items: center; }
@@ -262,3 +261,5 @@ footer a { color: var(--muted); }
   .param { grid-template-columns: 1fr 110px; }
   .params { grid-template-columns: 1fr; }
 }
+
+.apply-all { white-space: nowrap; }
