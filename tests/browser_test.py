@@ -91,7 +91,16 @@ def main() -> int:
         check(page.is_disabled("#run-button"), "Run disabled until the size is given")
         # second file: its own height (sample is 440 x 330 µm)
         page.locator('#file-table input[aria-label^="height of copy_by_height"]').fill("330")
+        w2 = page.locator('#file-table input[aria-label^="width of copy_by_height"]')
+        check(w2.input_value() == "440", f"width calculated from the typed height ({w2.input_value()})")
         page.fill("#size-value", "440")
+        h1 = page.locator('#file-table input[aria-label^="height of sample"]')
+        check(h1.get_attribute("placeholder") == "330", "the settings width shows the calculated height in the table")
+        check("sample: 440 × 330 µm" in page.inner_text("#size-derived"), "settings show the calculated size")
+        w2.fill("440")
+        check(page.locator('#file-table input[aria-label^="height of copy_by_height"]').input_value() == "330",
+              "typing the other side recalculates the first instead of clearing it")
+        page.locator('#file-table input[aria-label^="height of copy_by_height"]').fill("330")
         check(page.is_enabled("#run-button"), "Run enabled with sizes")
 
         print("3  settings round trip")

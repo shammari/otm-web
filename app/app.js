@@ -130,7 +130,7 @@ function addFiles(list) {
     const ext = extOf(file.name);
     if (ext === ".mat") {
       const entry = { name: uniqueName(stemOf(file.name)), stem: stemOf(file.name), mat: file, otm: null,
-                      check: null, status: "waiting", error: null, width: "", height: "", roi: null, corrections: null };
+                      check: null, status: "waiting", error: null, given: null, value: "", roi: null, corrections: null };
       const orphan = state.orphanOtm.get(entry.stem.toLowerCase());
       if (orphan) { entry.otm = orphan; state.orphanOtm.delete(entry.stem.toLowerCase()); }
       state.files.push(entry);
@@ -182,11 +182,58 @@ async function checkFile(entry) {
 }
 
 function fileSize(entry) {
-  if (num(entry.width)) return { width_um: num(entry.width), height_um: null };
-  if (num(entry.height)) return { width_um: null, height_um: num(entry.height) };
+  const own = num(entry.value);
+  if (entry.given && own > 0) return entry.given === "width" ? { width_um: own, height_um: null } : { width_um: null, height_um: own };
   const v = num($("#size-value").value);
   if (v && v > 0) return $("#size-kind").value === "width" ? { width_um: v, height_um: null } : { width_um: null, height_um: v };
   return null;
+}
+
+// width / height of the image (as LengthScale: the other side follows the image's pixel shape)
+function aspectOf(f) { return f.check ? f.check.image_cols / f.check.image_rows : null; }
+function sizeOf(f) {
+  const s = fileSize(f), a = aspectOf(f);
+  if (!s || !a) return null;
+  return s.width_um ? [s.width_um, s.width_um / a] : [s.height_um * a, s.height_um];
+}
+const fmtUm = (v) => String(Number(v.toFixed(1)));
+
+function showSize(f) {
+  const inputs = f._inputs;
+  if (!inputs) return;
+  const own = f.given && num(f.value) > 0;
+  const wh = sizeOf(f);
+  for (const key of ["width", "height"]) {
+    const inp = inputs[key];
+    if (own && f.given === key) { inp.classList.remove("derived"); inp.title = "Typed for this file"; continue; }
+    const v = wh ? fmtUm(key === "width" ? wh[0] : wh[1]) : "";
+    if (own) {
+      inp.value = v;
+      inp.placeholder = "–";
+      inp.classList.add("derived");
+      inp.title = "Calculated from the image shape; type here to give this side instead";
+    } else {
+      inp.value = "";
+      inp.placeholder = v || "–";
+      inp.classList.remove("derived");
+      inp.title = v ? "From the size in Settings; type here to give this file its own size" : "Type the width or the height of this image";
+    }
+  }
+}
+
+function showGlobalSize() {
+  const box = $("#size-derived");
+  const ok = state.files.filter((f) => f.status === "ok" && !(f.given && num(f.value) > 0));
+  const v = num($("#size-value").value);
+  const lines = v > 0 ? ok.slice(0, 3).map((f) => { const wh = sizeOf(f); return wh ? `${f.name}: ${fmtUm(wh[0])} × ${fmtUm(wh[1])} µm` : null; }).filter(Boolean) : [];
+  if (ok.length > 3 && lines.length) lines.push(`… and ${ok.length - 3} more`);
+  box.textContent = lines.join(" · ");
+  box.hidden = !lines.length;
+}
+
+function refreshSizes() {
+  for (const f of state.files) showSize(f);
+  showGlobalSize();
 }
 
 function renderFiles() {
@@ -200,15 +247,21 @@ function renderFiles() {
     const inputs = {};
     for (const key of ["width", "height"]) {
       inputs[key] = el("input", {
-        type: "number", min: "0", step: "any", value: f[key], placeholder: "–", "aria-label": `${key} of ${f.name} in µm`,
+        type: "number", min: "0", step: "any", placeholder: "–", "aria-label": `${key} of ${f.name} in µm`,
+        value: f.given === key ? f.value : "",
+        onblur: () => showSize(f),
         oninput: (e) => {
-          f[key] = e.target.value;
-          const other = key === "width" ? "height" : "width";
-          if (e.target.value && f[other] !== "") { f[other] = ""; inputs[other].value = ""; }
+          if (e.target.value) { f.given = key; f.value = e.target.value; }
+          else if (f.given === key) { f.given = null; f.value = ""; }
+          else return;                      // a calculated side was emptied: keep the given one
+
+          showSize(f);
+          showGlobalSize();
           updateRunState();
         },
       });
     }
+    f._inputs = inputs;
     let check;
     if (f.status === "checking" || f.status === "waiting") check = el("span", { class: "hint small", text: f.status === "waiting" ? "waiting…" : "checking…" });
     else if (f.status === "ok") {
@@ -232,6 +285,7 @@ function renderFiles() {
     ));
   }
   $("#file-table-wrap").hidden = $("#file-actions").hidden = state.files.length === 0;
+  refreshSizes();
   updateRunState();
 }
 
@@ -271,8 +325,8 @@ function setupFiles() {
         const ch = res.table[f.stem.toLowerCase()] || res.table[f.name.toLowerCase()];
         if (!ch) continue;
         matched++;
-        f.width = ch.width_um ?? "";
-        f.height = ch.width_um ? "" : (ch.height_um ?? "");
+        f.given = ch.width_um ? "width" : ch.height_um ? "height" : null;
+        f.value = String(ch.width_um || ch.height_um || "");
         f.roi = ch.roi_um || null;
       }
       const rows = Object.keys(res.table).length;
@@ -430,6 +484,7 @@ function fillForm(d) {
   } else setRadio("range", "auto");
   applyTissue();
   applyFigureOptions();
+  refreshSizes();
   validate();
 }
 
@@ -498,7 +553,8 @@ function wireSettings() {
   for (const r of $$('input[name="range"]')) r.addEventListener("change", () => { applyFigureOptions(); validate(); });
   $("#figures").addEventListener("change", () => { applyFigureOptions(); validate(); });
   for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction", "#size-value"]) $(id).addEventListener("input", validate);
-  $("#size-kind").addEventListener("change", validate);
+  $("#size-kind").addEventListener("change", () => { validate(); refreshSizes(); });
+  $("#size-value").addEventListener("input", refreshSizes);
   $("#preset").addEventListener("change", () => {
     const p = $("#preset").value;
     if (p !== "custom") writeParams(presetValues(p));

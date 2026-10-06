@@ -34,7 +34,7 @@
 <!-- ============================== 1 FILES ============================== -->
 <section id="files" class="card">
   <h2><b>1</b> Files</h2>
-  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too.</p>
+  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too. Type a file's width <i>or</i> height to give it its own size; the other side is calculated from the image shape.</p>
   <label id="drop" class="drop" tabindex="0">
     <input id="file-input" type="file" accept=".mat,.otm" multiple hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -86,7 +86,8 @@
         <input type="number" id="size-value" min="0" step="any" placeholder="e.g. 440" aria-label="Size in micrometres">
         <span class="unit">µm</span>
       </div>
-      <p class="hint small">Physical size of the image; the other side follows the image shape. Files with their own size in the table use that.</p>
+      <p class="hint small derived-line" id="size-derived" hidden></p>
+      <p class="hint small">Give one side; the other follows the image shape. A size typed in the file table overrides this for that file.</p>
     </fieldset>
 
     <fieldset>
