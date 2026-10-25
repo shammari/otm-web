@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+import multiprocessing
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -86,16 +87,61 @@ class ModelGeometry:
     capillary_index: np.ndarray        # 0-based index into the source capillary list
     fiber_index: np.ndarray            # 0-based index into the source fibre list
     n_unknown_types: int = 0
+    repairs: List[Tuple[int, float]] = field(default_factory=list)   # (source fibre, area removed) per repaired outline
+
+
+def _repair_fibre(f: Any, tol: float) -> Tuple[Any, float, bool]:
+    """Self-crossing/pinched ring(s) of one fibre made simple (:func:`otm_core.ringfix.repair_ring`).
+
+    Returns (fibre, area removed, changed). Shapely geometries are left alone
+    (they are made valid when the regions are planned)."""
+    from ..ringfix import repair_ring
+
+    if is_multipart(f):
+        parts, area, changed = [], 0.0, False
+        for r in f:
+            r2, a, c = _repair_fibre(r, tol)
+            parts.append(r2)
+            area, changed = area + a, changed or c
+        return parts, area, changed
+    if not (isinstance(f, np.ndarray) and f.ndim == 2 and f.shape[1] == 2 and len(f) >= 4):
+        return f, 0.0, False
+    closed = is_closed(f)
+    r, area = repair_ring(f, tol=tol)
+    n_open = len(f) - 1 if closed else len(f)
+    if len(r) == n_open and area == 0.0:
+        return f, 0.0, False
+    if closed and len(r):
+        r = np.vstack([r, r[:1]])
+    return r, float(area), True
+
+
+def repair_fibre_outlines(fibers: Sequence[Any], tol: float = 1e-9) -> Tuple[List[Any], List[Tuple[int, float]]]:
+    """Repair every self-crossing or pinched fibre outline before meshing.
+
+    Such outlines (from Dtect tracing, from the capillary-overlap clean-up or from
+    smoothing) make the boundary recovery of a mesher fail or loop. Each crossing
+    splits the ring in two and the smaller loop is dropped, as OTM 2026 (MATLAB)
+    does. Returns the fibres and ``(index, area removed)`` for each repaired one."""
+    out, notes = [], []
+    for k, f in enumerate(fibers):
+        f2, area, changed = _repair_fibre(f, tol)
+        out.append(f2)
+        if changed:
+            notes.append((k, area))
+    return out, notes
 
 
 def prepare_model_geometry(geometry: Geometry, rcap: float,
-                           remove_overlap: bool = True) -> ModelGeometry:
+                           remove_overlap: bool = True, repair_outlines: bool = True) -> ModelGeometry:
     """Legacy model selection (SkeletalFunctionalHeterogeneity_OpeningFcn).
 
     ``rcap`` is the non-dimensional capillary radius (``parameter.Rcap`` =
     r / (Ly/2)); see :func:`otm_core.fem.solve.TransportParameters.derive`.
     Exact duplicate capillaries are dropped (RemoveIndistinguishableCapillaries
-    with tolerance 0).
+    with tolerance 0). ``repair_outlines`` makes self-crossing fibre outlines
+    simple (:func:`repair_fibre_outlines`); the repairs are listed in
+    ``ModelGeometry.repairs`` (source fibre index, ndim area removed).
     """
     if geometry.length_scale is None:
         raise ValueError("geometry.length_scale must be set")
@@ -109,13 +155,18 @@ def prepare_model_geometry(geometry: Geometry, rcap: float,
     keep = np.sort(first)
     caps, cap_idx = caps[keep], cap_idx[keep]
     model_fibers, fib_idx = select_model_fibers(fibers, box)
+    repairs: List[Tuple[int, float]] = []
+    if repair_outlines and len(model_fibers):
+        span = float(np.max(np.ptp(box, axis=0)))
+        model_fibers, notes = repair_fibre_outlines(model_fibers, tol=1e-9 * span)
+        repairs = [(int(fib_idx[k]), a) for k, a in notes]
     types = np.asarray(geometry.fiber_types, dtype=int)
     types = types[fib_idx] if types.size else np.full(len(fib_idx), FIBER_TYPE_IIB, dtype=int)
     n_unknown = int(np.count_nonzero(types == FIBER_TYPE_UNKNOWN))
     types = np.where(types == FIBER_TYPE_UNKNOWN, FIBER_TYPE_IIB, types)
     return ModelGeometry(box=box, capillaries=caps, rcap=np.full(len(caps), float(rcap)),
                          fibers=model_fibers, fiber_types=types, capillary_index=cap_idx,
-                         fiber_index=fib_idx, n_unknown_types=n_unknown)
+                         fiber_index=fib_idx, n_unknown_types=n_unknown, repairs=repairs)
 
 
 # --------------------------------------------------------------------------
@@ -550,6 +601,23 @@ class MeshSettings:
     verbosity: int = 0
     threads: int = 0                   # 0 = gmsh default
     backend: str = "auto"              # "gmsh" | "triangle" | "auto" (gmsh when installed, else Triangle)
+    timeout_s: Optional[float] = None  # gmsh in a separate process with this time limit, one retry (None = in-process)
+
+
+DEFAULT_MESH_TIMEOUT_S = 600.0
+"""Time limit of one gmsh attempt in the program (:func:`default_mesh_settings`)."""
+
+
+def default_mesh_settings(**changes: Any) -> "MeshSettings":
+    """The settings the program uses: gmsh runs in a separate process that is
+    stopped after :data:`DEFAULT_MESH_TIMEOUT_S` and retried once with the other
+    algorithm, so a geometry gmsh cannot mesh never hangs the program."""
+    s = MeshSettings(timeout_s=DEFAULT_MESH_TIMEOUT_S)
+    return replace(s, **changes) if changes else s
+
+
+class MeshTimeout(RuntimeError):
+    """gmsh did not finish within the time limit (both attempts)."""
 
 
 def mesh_backend(settings: Optional["MeshSettings"] = None) -> str:
@@ -627,6 +695,8 @@ def build_tissue_mesh(model: ModelGeometry, settings: Optional[MeshSettings] = N
         from .mesh_triangle import build_tissue_mesh_triangle
 
         return build_tissue_mesh_triangle(model, s, plan, progress)
+    if s.timeout_s:
+        return _build_with_time_limit(model, s, plan, msh_path, progress)
     import gmsh  # imported lazily: the rest of otm_core does not need it
 
     t0 = time.perf_counter()
@@ -847,11 +917,104 @@ def _extract(gmsh, surf_region: Dict[int, int], cap_curves: Dict[int, List[int]]
                       rcap=plan.rcap, box=plan.box)
 
 
+# --------------------------------------------------------------------------
+# gmsh with a time limit (separate process, one retry)
+# --------------------------------------------------------------------------
+
+
+def _mesh_child(conn, model, settings, plan, msh_path) -> None:          # runs in the child process
+    def progress(f, msg):
+        conn.send(("progress", float(f), str(msg)))
+
+    try:
+        mesh = build_tissue_mesh(model, replace(settings, timeout_s=None), plan, msh_path, progress)
+        conn.send(("ok", mesh))
+    except BaseException as exc:                                    # noqa: BLE001 - reported to the parent
+        conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def _stop(proc) -> None:
+    proc.terminate()
+    proc.join(5)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(5)
+
+
+def _attempt(model, s: MeshSettings, plan, msh_path, progress, label: str):
+    """One gmsh run in a child process: ("ok", mesh) | ("timeout", None) | ("crash", text) | ("error", text)."""
+    ctx = multiprocessing.get_context("spawn")
+    recv, send = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_mesh_child, args=(send, model, s, plan, msh_path), daemon=True,
+                       name="otm-gmsh")
+    proc.start()
+    send.close()
+    deadline = time.monotonic() + float(s.timeout_s)
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                _stop(proc)
+                return "timeout", None
+            if not recv.poll(min(left, 0.2)):
+                continue
+            try:
+                kind, *payload = recv.recv()
+            except EOFError:
+                proc.join(5)
+                return "crash", f"the gmsh process ended unexpectedly (exit code {proc.exitcode})"
+            if kind == "progress":
+                report(progress, payload[0], payload[1] + label)      # may raise to cancel
+                continue
+            proc.join(5)
+            return kind, payload[0]
+    except BaseException:
+        _stop(proc)                                                 # cancelled: do not leave gmsh running
+        raise
+    finally:
+        recv.close()
+
+
+def _build_with_time_limit(model, s: MeshSettings, plan, msh_path, progress) -> TissueMesh:
+    t0 = time.perf_counter()
+    report(progress, 0.0, "Planning mesh regions")
+    plan = plan or plan_regions(model, polygon_segments=s.polygon_segments, overlap_rule=s.overlap_rule)
+    other = 5 if s.algorithm != 5 else 6                            # Delaunay <-> Frontal-Delaunay
+    tries = [(s, ""), (replace(s, algorithm=other), " (second attempt)")]
+    notes: List[str] = []
+    for k, (si, label) in enumerate(tries):
+        status, payload = _attempt(model, si, plan, msh_path, progress, label)
+        if status == "ok":
+            mesh = payload
+            mesh.info["attempts"] = k + 1
+            mesh.info["seconds"] = time.perf_counter() - t0
+            if notes:
+                mesh.info.setdefault("notes", []).extend(notes)
+            return mesh
+        if status == "error":
+            raise RuntimeError(payload)
+        why = payload if status == "crash" else f"gmsh did not finish in {si.timeout_s:.0f} s"
+        notes.append(f"algorithm {si.algorithm}: {why}")
+        if k + 1 < len(tries):
+            report(progress, 0.0, f"{why}; trying again with algorithm {other}")
+    if all("did not finish" in n for n in notes):
+        raise MeshTimeout(f"gmsh did not finish in {s.timeout_s:.0f} s (two attempts, algorithms {s.algorithm} and "
+                          f"{other}). The outlines may be too complex or broken: run the data check, simplify the "
+                          "outlines, or try a larger element size.")
+    raise RuntimeError("Meshing failed twice: " + "; ".join(notes))
+
+
 def mesh_tissue(geometry: Geometry, rcap: float, settings: Optional[MeshSettings] = None,
                 msh_path: Optional[str] = None,
                 progress: Optional[ProgressCallback] = None) -> Tuple[TissueMesh, ModelGeometry]:
     """Convenience: :func:`prepare_model_geometry` + :func:`build_tissue_mesh`."""
     report(progress, 0.0, "Preparing the model geometry")
     model = prepare_model_geometry(geometry, rcap)
-    return build_tissue_mesh(model, settings, msh_path=msh_path,
-                             progress=scaled(progress, 0.05, 1.0)), model
+    mesh = build_tissue_mesh(model, settings, msh_path=msh_path, progress=scaled(progress, 0.05, 1.0))
+    if model.repairs:
+        mesh.info["outlines_repaired"] = [[int(k), float(a)] for k, a in model.repairs]
+        mesh.info.setdefault("notes", []).append(
+            f"{len(model.repairs)} self-crossing fibre outline(s) repaired before meshing")
+    return mesh, model

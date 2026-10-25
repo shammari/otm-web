@@ -1,5 +1,8 @@
 // OTM Web page: files, settings, run, results. The analysis itself runs in worker.js.
 
+import { TissueView, parseView } from "./viewer.js";
+import { CorrectionsEditor, TOOLS } from "./editor.js";
+
 // ============================================================================================
 // small helpers
 // ============================================================================================
@@ -30,6 +33,7 @@ function fmtParam(v) {
 }
 
 function toast(text, warn = false, ms = 4500) {
+  if (warn && typeof logEvent === "function") logEvent(`notice: ${text}`);
   const t = el("div", { class: "toast" + (warn ? " warn" : ""), role: "status", text });
   document.body.append(t);
   setTimeout(() => t.remove(), ms);
@@ -94,7 +98,8 @@ class Engine {
 // ============================================================================================
 const state = {
   info: null,
-  files: [],            // {name, mat: File, otm: File|null, check, status, error, width, height, roi, corrections}
+  files: [],            // {name, mat: File, otm: File|null, check, status, error, width, height, roi, corrections,
+                        //  otmEdits: edits in the .otm, edits: corrections made here (null: use the .otm)}
   orphanOtm: new Map(), // stem (lower case) -> File, .otm added before its .mat
   results: new Map(),   // name -> result of otm_web.run
   order: [],            // result names in run order
@@ -103,6 +108,10 @@ const state = {
   stopRequested: false,
   extras: {},           // settings from a loaded JSON the form does not show (mesh, flux, retouch ...)
   figureCache: new Map(),
+  views: new Map(),     // sample -> parsed tissue view (the last few)
+  viewRange: undefined, // PO2 colour range of the tissue views (undefined: the one in the settings)
+  viewColormap: null,
+  log: [],              // errors and warnings of this visit, for the diagnostic report
 };
 
 const engine = new Engine();
@@ -149,14 +158,15 @@ function addFiles(list) {
     if (ext === ".mat") {
       const entry = { name: uniqueName(stemOf(file.name)), stem: stemOf(file.name), mat: file, otm: null,
                       check: null, status: "waiting", error: null, given: state.defaultSize ? state.defaultSize.given : null,
-                      value: state.defaultSize ? state.defaultSize.value : "", roi: null, corrections: null };
+                      value: state.defaultSize ? state.defaultSize.value : "", roi: null, corrections: null,
+                      otmEdits: null, edits: null };
       const orphan = state.orphanOtm.get(entry.stem.toLowerCase());
       if (orphan) { entry.otm = orphan; state.orphanOtm.delete(entry.stem.toLowerCase()); }
       state.files.push(entry);
       added.push(entry);
     } else if (ext === ".otm") {
       const target = state.files.find((f) => f.stem.toLowerCase() === stemOf(file.name).toLowerCase());
-      if (target) { target.otm = file; target.corrections = null; if (!added.includes(target)) added.push(target); }
+      if (target) { target.otm = file; target.corrections = null; target.otmEdits = null; if (!added.includes(target)) added.push(target); }
       else state.orphanOtm.set(stemOf(file.name).toLowerCase(), file);
     } else ignored++;
   }
@@ -177,7 +187,7 @@ async function checkFile(entry) {
   try {
     await engine.started;
     await putFile(entry);
-    const res = await engine.call("inspect", { name: entry.name });
+    const res = await engine.call("inspect", { name: entry.name, opts: checkOptions() });
     if (res.ok) {
       entry.check = res;
       entry.status = "ok";
@@ -185,6 +195,7 @@ async function checkFile(entry) {
       if (entry.otm) {
         const c = await engine.call("corrections", { name: entry.name });
         entry.corrections = c.ok ? c.n_edits : null;
+        entry.otmEdits = c.ok ? c.edits : null;
         if (!c.ok) entry.error = `session file not used: ${c.error}`;
       }
     } else {
@@ -198,6 +209,50 @@ async function checkFile(entry) {
     if (engine.ready) engine.call("drop", { name: entry.name }).catch(() => {});
   }
   renderFiles();
+}
+
+// what the data check and the editor depend on
+function checkOptions() {
+  return { tissue: radio("tissue"), use_fibre_types: $("#use-types").checked, data_check: radio("dcheck") };
+}
+
+// the tissue type changes what the data check looks for: check every readable file again
+let recheckTimer = 0;
+function recheckFiles() {
+  clearTimeout(recheckTimer);
+  recheckTimer = setTimeout(() => { for (const f of state.files) if (f.status === "ok") checkFile(f); }, 300);
+}
+
+// corrections a run of this file will use: made here, else from its .otm
+function editsOf(entry) { return entry.edits !== null ? entry.edits : (entry.otmEdits || []); }
+
+const DC_ICON = { ok: "✓", warning: "⚠", error: "✗", fatal: "✗" };
+
+// the data-check cell of the file table
+function checkCell(f) {
+  const c = f.check, q = c && c.check;
+  const bits = [];
+  if (!q) bits.push(el("span", { class: "ok-text", text: "✓ readable" }));
+  else {
+    const n = (sev) => q.issues.filter((i) => i.severity === sev).length;
+    const policy = radio("dcheck");
+    let text, cls;
+    if (q.status === "ok") { text = "✓ passed"; cls = "ok-text"; }
+    else if (q.status === "warning") { text = `⚠ ${n("warning")} warning${n("warning") > 1 ? "s" : ""}`; cls = "note-text"; }
+    else if (q.status === "fatal") { text = "✗ cannot be analysed"; cls = "warn-text"; }
+    else {
+      const what = policy === "skip" ? "file will be skipped" : (policy === "keep" && q.can_keep) ? "flagged items kept" : "flagged items will be removed";
+      text = `✗ ${n("error")} error${n("error") > 1 ? "s" : ""}: ${what}`;
+      cls = "warn-text";
+    }
+    bits.push(el("span", { class: cls, title: q.headline + (q.issues.length ? "\n" + q.issues.map((i) => `${i.code} ${i.title}: ${i.message}`).join("\n") : ""), text }));
+    if (q.issues.length) bits.push(el("div", { class: "hint small dc-codes", text: q.issues.map((i) => `${i.code} ${i.title}`).join(" · ") }));
+  }
+  const nEd = editsOf(f).length;
+  if (nEd) bits.push(el("div", { class: "hint small", text: `${nEd} correction${nEd > 1 ? "s" : ""}${f.edits !== null ? " made here" : " from the .otm"}` }));
+  if (f.error) bits.push(el("div", { class: "warn-text small", text: f.error }));
+  if (c && c.notes && c.notes.length) bits.push(el("div", { class: "hint small", text: c.notes.join("; ") }));
+  return el("span", {}, ...bits);
 }
 
 function fileSize(entry) {
@@ -289,13 +344,12 @@ function renderFiles() {
       onclick: () => applySizeToAll(f) }, "Same for all");
     let check;
     if (f.status === "checking" || f.status === "waiting") check = el("span", { class: "hint small", text: f.status === "waiting" ? "waiting…" : "checking…" });
-    else if (f.status === "ok") {
-      const bits = [el("span", { class: "ok-text", text: "✓ readable" })];
-      if (f.corrections !== null && f.corrections !== undefined) bits.push(el("span", { class: "hint small", text: ` + ${f.corrections} correction(s)` }));
-      if (f.error) bits.push(el("div", { class: "warn-text small", text: f.error }));
-      if (c.notes && c.notes.length) bits.push(el("div", { class: "hint small", text: c.notes.join("; ") }));
-      check = el("span", {}, ...bits);
-    } else check = el("span", { class: "warn-text", text: `✗ ${f.error || "cannot be read"} (left out)` });
+    else if (f.status === "ok") check = checkCell(f);
+    else check = el("span", { class: "warn-text", text: `✗ ${f.error || "cannot be read"} (left out)` });
+    const correct = f.status === "ok"
+      ? el("button", { class: "ghost small", type: "button", title: "See the data with the flagged items, and correct capillaries, fibres and fibre types",
+          onclick: () => openEditor(f) }, "Correct…")
+      : null;
     tbody.append(el("tr", { "data-name": f.name },
       el("td", {}, el("b", { text: f.name }), f.otm ? el("span", { class: "hint small", text: " + .otm" }) : null),
       el("td", { class: "num", text: c ? `${c.image_cols} × ${c.image_rows}` : "" }),
@@ -305,7 +359,7 @@ function renderFiles() {
       el("td", { class: "num" }, inputs.width),
       el("td", { class: "num" }, inputs.height),
       el("td", {}, f._apply),
-      el("td", {}, check),
+      el("td", { class: "dc-cell" }, check, correct),
       el("td", {}, el("button", { class: "remove", type: "button", title: `Remove ${f.name}`, "aria-label": `Remove ${f.name}`,
         onclick: () => removeFile(f) }, "×")),
     ));
@@ -489,6 +543,7 @@ function settingsFromForm() {
     width_um: size ? size.width_um : null,
     height_um: size ? size.height_um : null,
     roi_um: radio("roi") === "edges" ? ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1"].map((id) => num($(id).value)) : null,
+    roi_fraction: radio("roi") === "shares" ? ["#roi-fx0", "#roi-fx1", "#roi-fy0", "#roi-fy1"].map((id) => num($(id).value) / 100) : null,
     parameters: state.info ? readParams() : null,
     exercise: $("#exercise").value || "resting",
     non_uniform: $("#non-uniform").checked,
@@ -501,14 +556,101 @@ function settingsFromForm() {
     figure_width: $("#fig-width").value || "double",
     figure_formats: $$("#formats input:checked").map((i) => i.value),
     po2_range_mmHg: radio("range") === "fixed" ? [num($("#range-lo").value), num($("#range-hi").value)] : null,
+    data_check: radio("dcheck"),
   };
+  if (state.info) Object.assign(s, advancedFromForm());
+  // a fixed flux-line cap is typed in µm; the settings hold it in model units (half the tissue
+  // height), so the saved JSON uses the first file's size, and each run its own (settingsForFile)
+  if ($("#flux-cap").value === "fixed" && !$("#flux-legacy").checked) {
+    const first = runnable().map(sizeOf).find(Boolean);
+    s.flux.max_length = first ? capNdim(first[1]) : "auto";
+  }
   return s;
 }
 
+const capNdim = (height_um) => num($("#flux-cap-um").value) / (height_um / 2);
+
+// page-only options, sent with a run but not part of the settings JSON (the batch runner rejects unknown keys)
+function webOptions() { return { save_session: $("#save-session").checked }; }
+
 function settingsForFile(entry, base) {
   const s = { ...base, ...(fileSize(entry) || { width_um: null, height_um: null }) };
-  if (entry.roi) s.roi_um = entry.roi;
+  if (entry.roi) { s.roi_um = entry.roi; s.roi_fraction = null; }
+  if ($("#flux-cap").value === "fixed" && !$("#flux-legacy").checked) {
+    const wh = sizeOf(entry);
+    if (wh) s.flux = { ...s.flux, max_length: capNdim(wh[1]) };
+  }
   return s;
+}
+
+// ---- advanced settings: retouch, mesh, flux lines ---------------------------------------------
+function advancedFromForm() {
+  const d = state.info.settings;
+  const k = Math.round(num($("#rt-smooth-tol").value) || d.retouch.smooth_tol);
+  const retouch = { ...d.retouch, ...(state.extras.retouch || {}),
+    smooth: $("#rt-smooth").checked, smooth_tol: k % 2 ? k : k + 1,
+    reduce: $("#rt-reduce").checked, reduce_tol: num($("#rt-reduce-tol").value) ?? d.retouch.reduce_tol,
+    disjoint: $("#rt-disjoint").checked,
+    tangent: $("#rt-tangent").checked, tangent_tol: num($("#rt-tangent-tol").value) ?? d.retouch.tangent_tol };
+  const mesh = { ...d.mesh, ...(state.extras.mesh || {}),
+    h_max: num($("#mesh-hmax").value) ?? d.mesh.h_max, wall_segments: Math.round(num($("#mesh-wall").value) ?? d.mesh.wall_segments),
+    overlap_rule: $("#mesh-overlap").value };
+  const legacy = $("#flux-legacy").checked;
+  const cap = $("#flux-cap").value;
+  const flux = { ...d.flux, ...(state.extras.flux || {}),
+    lines_per_capillary: Math.round(num($("#flux-lines").value) ?? d.flux.lines_per_capillary),
+    integrator: $("#flux-integrator").value,
+    parametrization: legacy ? "time" : "arc_length",
+    initial_radius: legacy ? 0.015 : null,
+    max_length: legacy || cap === "auto" ? "auto" : cap === "none" ? null : "auto" };
+  return { retouch, mesh, flux };
+}
+
+function fillAdvanced(d) {
+  const def = state.info.settings;
+  const rt = { ...def.retouch, ...(d.retouch || {}) };
+  $("#rt-smooth").checked = !!rt.smooth;
+  $("#rt-smooth-tol").value = rt.smooth_tol;
+  $("#rt-reduce").checked = !!rt.reduce;
+  $("#rt-reduce-tol").value = rt.reduce_tol;
+  $("#rt-disjoint").checked = !!rt.disjoint;
+  $("#rt-tangent").checked = !!rt.tangent;
+  $("#rt-tangent-tol").value = rt.tangent_tol;
+  const m = { ...def.mesh, ...(d.mesh || {}) };
+  $("#mesh-hmax").value = m.h_max;
+  $("#mesh-wall").value = m.wall_segments;
+  $("#mesh-overlap").value = m.overlap_rule;
+  const f = { ...def.flux, ...(d.flux || {}) };
+  $("#flux-lines").value = f.lines_per_capillary;
+  $("#flux-integrator").value = f.integrator === "ivp" ? "ivp" : "heun";
+  $("#flux-legacy").checked = f.parametrization === "time";
+  if (f.max_length === null) $("#flux-cap").value = "none";
+  else if (f.max_length === "auto" || f.max_length === undefined) $("#flux-cap").value = "auto";
+  else {
+    $("#flux-cap").value = "fixed";
+    const first = runnable().map(sizeOf).find(Boolean);   // model units -> µm with the first file's size
+    if (first) $("#flux-cap-um").value = +(Number(f.max_length) * first[1] / 2).toFixed(1);
+  }
+  applyAdvanced();
+}
+
+function applyAdvanced() {
+  $("#rt-smooth-tol").disabled = !$("#rt-smooth").checked;
+  $("#rt-reduce-tol").disabled = !$("#rt-reduce").checked;
+  $("#rt-tangent-tol").disabled = !$("#rt-tangent").checked;
+  const legacy = $("#flux-legacy").checked;
+  $("#flux-cap").disabled = legacy;
+  $("#flux-cap-um-row").hidden = legacy || $("#flux-cap").value !== "fixed";
+  // tell where the defaults were changed
+  const d = state.info ? state.info.settings : null;
+  if (d) {
+    const a = advancedFromForm();
+    const changed = JSON.stringify([a.retouch, a.mesh]) !== JSON.stringify([{ ...d.retouch, ...(state.extras.retouch || {}) }, { ...d.mesh, ...(state.extras.mesh || {}) }])
+      || a.flux.lines_per_capillary !== d.flux.lines_per_capillary || a.flux.integrator !== d.flux.integrator || legacy
+      || $("#flux-cap").value !== "auto" || !$("#save-session").checked;
+    $("#advanced summary .hint").textContent = changed ? "changed from the defaults" : "retouch, mesh, flux lines, session files";
+    $("#advanced").classList.toggle("changed", changed);
+  }
 }
 
 function formToDefaults() {
@@ -529,8 +671,13 @@ function fillForm(d) {
   if (d.roi_um) {
     setRadio("roi", "edges");
     ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1"].forEach((id, i) => { $(id).value = d.roi_um[i]; });
+  } else if (d.roi_fraction) {
+    setRadio("roi", "shares");
+    ["#roi-fx0", "#roi-fx1", "#roi-fy0", "#roi-fy1"].forEach((id, i) => { $(id).value = +(100 * d.roi_fraction[i]).toFixed(3); });
   } else setRadio("roi", "default");
-  $("#roi-edges").hidden = radio("roi") !== "edges";
+  applyRoi();
+  setRadio("dcheck", d.data_check || "fix");
+  fillAdvanced(d);
   const tissue = d.tissue || "skeletal";
   const values = { ...presetValues(tissue), ...(d.parameters || {}) };
   $("#preset").value = samePreset(values, tissue) ? tissue : "custom";
@@ -561,9 +708,16 @@ function fillForm(d) {
   validate();
 }
 
-const FORM_KEYS = new Set(["tissue", "use_fibre_types", "width_um", "height_um", "roi_um", "parameters", "exercise",
-  "non_uniform", "differential_extraction", "steps", "figures", "dpi", "colormap", "figure_layout", "figure_width",
-  "figure_formats", "po2_range_mmHg"]);
+const FORM_KEYS = new Set(["tissue", "use_fibre_types", "width_um", "height_um", "roi_um", "roi_fraction", "parameters",
+  "exercise", "non_uniform", "differential_extraction", "steps", "figures", "dpi", "colormap", "figure_layout",
+  "figure_width", "figure_formats", "po2_range_mmHg", "data_check"]);
+// retouch, mesh and flux are shown in part (Advanced settings): the rest of each is kept as loaded
+const PARTLY_SHOWN = ["retouch", "mesh", "flux"];
+
+function applyRoi() {
+  $("#roi-edges").hidden = radio("roi") !== "edges";
+  $("#roi-shares").hidden = radio("roi") !== "shares";
+}
 
 async function loadSettingsFile(file) {
   let d;
@@ -574,7 +728,8 @@ async function loadSettingsFile(file) {
   if (d.parameter_file) { notes.push("the .dat file it names cannot be opened from the browser; load it under Biophysical parameters"); delete d.parameter_file; }
   const problem = await engine.call("check", { settings: d });
   if (problem) return toast(`Settings not loaded: ${problem}`, true, 7000);
-  state.extras = Object.fromEntries(Object.entries(d).filter(([k]) => !FORM_KEYS.has(k)));
+  state.extras = Object.fromEntries(Object.entries(d).filter(([k]) => !FORM_KEYS.has(k) && !PARTLY_SHOWN.includes(k)));
+  for (const k of PARTLY_SHOWN) if (d[k]) state.extras[k] = { ...d[k] };
   fillForm(d);
   toast(`Settings loaded from ${file.name}` + (notes.length ? ` (${notes.join("; ")})` : "."), notes.length > 0, 6000);
 }
@@ -586,7 +741,24 @@ function validate() {
     if (r.some((v) => v === null || Number.isNaN(v))) msgs.push("give all four edges of the region of interest");
     else if (!(r[0] < r[1] && r[2] < r[3])) msgs.push("each region edge must be larger than the one before it ('from' < 'to')");
   }
+  if (radio("roi") === "shares") {
+    const r = ["#roi-fx0", "#roi-fx1", "#roi-fy0", "#roi-fy1"].map((id) => num($(id).value));
+    if (r.some((v) => v === null || Number.isNaN(v) || v < 0 || v > 100)) msgs.push("give all four region shares between 0 and 100 %");
+    else if (!(r[0] < r[1] && r[2] < r[3])) msgs.push("each region share must be larger than the one before it ('from' < 'to')");
+  }
   if (state.info && Object.values(readParams()).some((v) => v === null || Number.isNaN(v) || v < 0)) msgs.push("every biophysical parameter needs a number of 0 or more");
+  const adv = [["#rt-smooth-tol", 1, 51, "smoothing window"], ["#rt-reduce-tol", 0.05, 20, "vertex-reduction tolerance"],
+    ["#rt-tangent-tol", 0.1, 20, "gap between touching fibres"], ["#mesh-hmax", 0.002, 0.2, "largest mesh element"],
+    ["#mesh-wall", 8, 96, "segments per capillary wall"], ["#flux-lines", 1, 256, "flux lines per capillary"]];
+  for (const [id, lo, hi, what] of adv) {
+    if ($(id).disabled) continue;
+    const v = num($(id).value);
+    if (v === null || Number.isNaN(v) || v < lo || v > hi) msgs.push(`${what} must be between ${lo} and ${hi} (Advanced settings)`);
+  }
+  if ($("#flux-cap").value === "fixed" && !$("#flux-legacy").checked) {
+    const v = num($("#flux-cap-um").value);
+    if (v === null || Number.isNaN(v) || v <= 0) msgs.push("the fixed flux-line cap needs a length in µm (Advanced settings)");
+  }
   if ($("#figures").checked && !$$("#formats input:checked").length) msgs.push("choose at least one figure format");
   if (radio("range") === "fixed") {
     const lo = num($("#range-lo").value), hi = num($("#range-hi").value);
@@ -616,8 +788,12 @@ function setupSettings(info) {
 }
 
 function wireSettings() {
-  for (const r of $$('input[name="tissue"]')) r.addEventListener("change", () => { applyTissue(); validate(); });
-  for (const r of $$('input[name="roi"]')) r.addEventListener("change", () => { $("#roi-edges").hidden = radio("roi") !== "edges"; validate(); });
+  for (const r of $$('input[name="tissue"]')) r.addEventListener("change", () => { applyTissue(); validate(); recheckFiles(); });
+  $("#use-types").addEventListener("change", recheckFiles);
+  for (const r of $$('input[name="dcheck"]')) r.addEventListener("change", () => renderFiles());
+  for (const r of $$('input[name="roi"]')) r.addEventListener("change", () => { applyRoi(); validate(); });
+  for (const id of ["#roi-fx0", "#roi-fx1", "#roi-fy0", "#roi-fy1"]) $(id).addEventListener("input", validate);
+  for (const e of $$("#advanced input, #advanced select")) e.addEventListener("change", () => { applyAdvanced(); validate(); });
   for (const r of $$('input[name="layout"]')) r.addEventListener("change", () => {
     const dpi = Number($("#dpi").value);
     if (radio("layout") === "legacy" && dpi === 600) $("#dpi").value = "300";
@@ -677,7 +853,14 @@ function updateRunState() {
   else if (!files.length) hint = "None of the files can be read.";
   else if (missingSize.length) hint = `Type the width or the height in the file table for: ${missingSize.map((f) => f.name).join(", ")}.`;
   else if (!$("#settings-error").hidden) hint = "Fix the settings first.";
-  else hint = `${files.length} file(s) ready.` + (state.files.length > files.length ? ` ${state.files.length - files.length} unreadable file(s) will be left out.` : "");
+  else {
+    hint = `${files.length} file(s) ready.` + (state.files.length > files.length ? ` ${state.files.length - files.length} unreadable file(s) will be left out.` : "");
+    const flagged = files.filter((f) => f.check && f.check.check && (f.check.check.status === "error" || f.check.check.status === "fatal"));
+    if (flagged.length) {
+      const pol = radio("dcheck");
+      hint += ` Data check: ${flagged.length} file(s) with segmentation errors` + (pol === "skip" ? " will be skipped." : pol === "keep" ? " keep their flagged items where allowed." : ": the flagged items will be removed first.");
+    }
+  }
   if (state.running) hint = "Running… you can keep using this tab; leaving the page stops the run.";
   $("#run-hint").textContent = hint;
   btn.disabled = state.running || !engine.ready || !files.length || missingSize.length > 0 || checking || !$("#settings-error").hidden;
@@ -748,7 +931,7 @@ async function runAll() {
     setOverviewRow(f.name, { name: f.name, running: true });
     try {
       await putFile(f);
-      const res = await engine.call("run", { name: f.name, settings: settingsForFile(f, base) });
+      const res = await engine.call("run", { name: f.name, settings: { ...settingsForFile(f, base), ...webOptions() }, edits: f.edits });
       res.file = f.mat.name;
       storeResult(res);
       row.classList.add(res.ok ? "done" : "failed");
@@ -758,6 +941,7 @@ async function runAll() {
       row.classList.add("failed");
       $(".pstep", row).textContent = `Failed: ${e.message}`;
       storeResult({ name: f.name, ok: false, errors: [{ step: "run", message: e.message }], files: [], summary: null, seconds: (performance.now() - started) / 1000 });
+      logEvent(`run ${f.name}: ${e.message}`, e.details);
       if (engine.failed) { clearInterval(runClock); break; }
     } finally {
       clearInterval(runClock);
@@ -778,6 +962,8 @@ async function runAll() {
 function storeResult(res) {
   if (!state.results.has(res.name)) state.order.push(res.name);
   state.results.set(res.name, res);
+  state.views.delete(res.name);
+  for (const e of res.errors || []) logEvent(`${res.name}: ${e.message}`);
   for (const k of [...state.figureCache.keys()]) if (k.startsWith(res.name + "/")) { URL.revokeObjectURL(state.figureCache.get(k)); state.figureCache.delete(k); }
   setOverviewRow(res.name, res);
   if (!state.selected || state.selected === res.name) selectSample(res.name);
@@ -842,12 +1028,16 @@ function selectSample(name) {
   if (res.solve) meta.push(`${res.solve.converged ? "converged" : "NOT converged"} in ${res.solve.iterations} Newton iteration(s), PO₂ ${fmt(res.solve.po2_min_mmHg)}–${fmt(res.solve.po2_max_mmHg)} mmHg`);
   if (res.flux) meta.push(`flux lines from ${res.flux.capillaries_with_lines} of ${res.flux.seed_capillaries} ROI capillaries`);
   if (res.switches && res.po2) meta.push(`exercise ${LEVEL_NAMES[res.switches.exercise] || res.switches.exercise}: O₂ demand × ${fmtNum(res.switches.demand)}`);
-  if (res.corrections) meta.push(`${res.corrections} saved correction(s) applied`);
+  if (res.corrections) meta.push(`${res.corrections} correction(s) applied${res.corrections_from === "page" ? " (made here)" : " (from the .otm)"}`);
   if (res.seconds) meta.push(`${fmt(res.seconds, 0)} s`);
   $(".sample-meta", node).textContent = meta.join(" · ");
   const errs = $(".errors", node);
   for (const e of res.errors || []) errs.append(el("p", { text: e.message }));
   for (const w of res.corrections_skipped || []) errs.append(el("p", { text: `Correction skipped: ${w}` }));
+  showCheckResult($(".dc-result", node), res.check);
+  const otm = (res.files || []).find((p) => p.toLowerCase().endsWith(".otm"));
+  const otmBtn = $(".save-otm", node);
+  if (otm) { otmBtn.hidden = false; otmBtn.addEventListener("click", () => saveOutput(otm)); }
 
   const ind = $(".block-indices", node);
   if (res.indices) fillTable($("table", ind), res.indices, [1]);
@@ -876,6 +1066,56 @@ function selectSample(name) {
   if (!files.length) $(".files-list", node).hidden = true;
   view.append(node);
   loadThumbnails(gallery);
+  showTissueView($(".block-view", node), res);
+}
+
+// what the data check found and did, under a sample's name (nothing when it passed)
+function showCheckResult(box, q) {
+  box.textContent = "";
+  if (!q || (q.status === "ok" && !q.fixed.length)) { box.hidden = true; return; }
+  box.hidden = false;
+  box.className = "dc-result " + (q.status === "ok" || q.status === "warning" ? "note" : "warn");
+  box.append(el("b", { text: q.headline }));
+  const items = [...q.fixed.map((i) => `${i.code} ${i.title}: ${i.message} (removed)`), ...q.issues.map((i) => `${i.code} ${i.title}: ${i.message}`)];
+  if (items.length) box.append(el("ul", {}, ...items.map((t) => el("li", { text: t }))));
+  if (q.actions.length) box.append(el("p", { class: "small", text: q.actions.join(" · ") }));
+}
+
+// ---- tissue view ------------------------------------------------------------------------------
+async function viewData(name) {
+  if (state.views.has(name)) return state.views.get(name);
+  const bytes = await engine.call("view", { name });
+  if (!bytes) return null;
+  const v = parseView(bytes.buffer.byteLength === bytes.byteLength ? bytes.buffer : bytes.slice().buffer);
+  state.views.set(name, v);
+  while (state.views.size > 4) state.views.delete(state.views.keys().next().value);   // keep the last few
+  return v;
+}
+
+let currentView = null;
+async function showTissueView(block, res) {
+  if (currentView) { currentView.destroy(); currentView = null; }
+  const host = $(".tv-host", block);
+  if (!res.view) {
+    block.hidden = !res.ok ? true : false;
+    host.replaceChildren(el("p", { class: "empty", text: res.view_error ? `The tissue view could not be made: ${res.view_error}` : "No tissue view for this run." }));
+    return;
+  }
+  host.replaceChildren(el("p", { class: "empty", text: "Loading the tissue view…" }));
+  let data;
+  try { data = await viewData(res.name); }
+  catch (e) { host.replaceChildren(el("p", { class: "empty", text: `The tissue view could not be loaded: ${e.message}` })); return; }
+  if (!host.isConnected || state.selected !== res.name) return;   // another sample was selected meanwhile
+  if (!data) { host.replaceChildren(el("p", { class: "empty", text: "No tissue view for this run." })); return; }
+  host.textContent = "";
+  const settings = state.lastSettings || {};
+  const range = state.viewRange !== undefined ? state.viewRange : (settings.po2_range_mmHg || null);
+  currentView = new TissueView(host, {
+    colormap: state.viewColormap || settings.colormap || "turbo", range,
+    onRange: (r) => { state.viewRange = r; },
+  });
+  currentView.el.cmap.addEventListener("change", () => { state.viewColormap = currentView.colormap; });
+  currentView.setData(data);
 }
 
 const baseName = (p) => p.split("/").pop();
@@ -950,11 +1190,210 @@ async function downloadZip() {
 }
 
 // ============================================================================================
+// CORRECT DATA (the desktop's "Correct data" step, with the data check's flagged items)
+// ============================================================================================
+const ed = { entry: null, edits: [], redo: [], start: null, editor: null, busy: false, pending: false };
+
+async function openEditor(entry) {
+  if (state.running) return toast("Wait until the run has finished.", true);
+  const dlg = $("#editor-dialog");
+  ed.entry = entry;
+  ed.start = editsOf(entry).slice();
+  ed.edits = ed.start.slice();
+  ed.redo = [];
+  $("#ed-title").textContent = `Correct data · ${entry.name}`;
+  $("#ed-check").textContent = "Loading…";
+  if (!ed.editor) {
+    ed.editor = new CorrectionsEditor($("#ed-stage"), {
+      onEdit: (e) => { ed.edits.push(e); ed.redo = []; refreshEditor(); },
+      onHover: (t) => { $("#ed-hover").textContent = t; },
+      onTool: (t) => {
+        for (const b of $$("#ed-tools button")) b.setAttribute("aria-pressed", String(b.dataset.tool === t));
+        $("#ed-tool-hint").textContent = (TOOLS.find(([k]) => k === t) || [, , ""])[2];
+      },
+    });
+    const box = $("#ed-tools");
+    for (const [key, label, tip] of TOOLS) box.append(el("button", { type: "button", class: "ghost small", "data-tool": key, title: tip, onclick: () => { ed.editor.setTool(key); ed.editor.canvas.focus(); } }, label));
+    $("#ed-type").addEventListener("change", () => ed.editor.setFiberType($("#ed-type").value));
+    $("#ed-undo").addEventListener("click", () => { if (ed.edits.length) { ed.redo.push(ed.edits.pop()); refreshEditor(); } });
+    $("#ed-redo").addEventListener("click", () => { if (ed.redo.length) { ed.edits.push(ed.redo.pop()); refreshEditor(); } });
+    $("#ed-reset").addEventListener("click", () => { if (ed.edits.length) { ed.redo = ed.edits.reverse(); ed.edits = []; refreshEditor(); } });
+    $("#ed-done").addEventListener("click", () => dlg.close());
+    $("#ed-save-otm").addEventListener("click", saveEditorSession);
+    dlg.addEventListener("close", closeEditor);
+    dlg.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); $(e.shiftKey ? "#ed-redo" : "#ed-undo").click(); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); $("#ed-redo").click(); }
+      else if (e.key === "Escape" && ed.editor.outline.length) { e.preventDefault(); ed.editor.cancelOutline(); }   // Esc cancels the outline, not the dialog
+    });
+    ed.editor.setTool("pan");
+  }
+  ed.editor.data = null;
+  ed.editor.setFiberType($("#ed-type").value);
+  dlg.showModal();
+  try {
+    await engine.started;
+    await putFile(entry);
+    await refreshEditor();
+  } catch (e) { $("#ed-check").textContent = `The data could not be shown: ${e.message}`; }
+}
+
+async function refreshEditor() {
+  if (ed.busy) { ed.pending = true; return; }
+  ed.busy = true;
+  try {
+    do {
+      ed.pending = false;
+      const p = await engine.call("prepare", { name: ed.entry.name, opts: checkOptions(), edits: ed.edits });
+      if (!p.ok) { $("#ed-check").textContent = `The data could not be shown: ${p.error}`; return; }
+      ed.last = p;
+      if (!ed.pending) { ed.editor.setData(p); showEditorPanel(p); }
+    } while (ed.pending);
+  } finally { ed.busy = false; }
+}
+
+function showEditorPanel(p) {
+  const box = $("#ed-check");
+  box.textContent = "";
+  const q = p.check;
+  if (q) {
+    box.className = "ed-check " + (q.status === "ok" ? "ok" : q.status === "warning" ? "note" : "warn");
+    box.append(el("b", { text: q.headline }));
+    for (const i of [...q.fixed.map((x) => ({ ...x, removed: true })), ...q.issues]) {
+      box.append(el("details", {},
+        el("summary", { text: `${i.code} ${i.title}${i.removed ? " (removed)" : ""}` }),
+        el("p", { text: i.message }),
+        i.items.length ? el("ul", {}, ...i.items.slice(0, 12).map((t) => el("li", { text: t }))) : null,
+        el("p", { class: "small", text: `Why it matters: ${i.why}` }),
+        el("p", { class: "small", text: `What to do: ${i.advice}` })));
+    }
+    if (p.policy_note) box.append(el("p", { class: "small", text: p.policy_note + " (Settings → Data check)" }));
+    if (p.flags.fibres.length || p.flags.caps.length) box.append(el("p", { class: "small", text: "Flagged items are drawn dashed in coral on the right." }));
+  }
+  const list = $("#ed-list");
+  list.textContent = "";
+  p.edits_text.forEach((t, i) => list.append(el("li", { class: p.applied[i] ? "" : "skipped", text: t })));
+  list.scrollTop = list.scrollHeight;
+  const n = p.edits_text.length;
+  $("#ed-info").textContent = n ? `${n} correction${n > 1 ? "s" : ""}; indices, mesh and results are computed from the corrected data.`
+    : "No corrections: the data are as in the file" + (p.check && p.check.fixed.length ? " (after the data check)." : ".");
+  $("#ed-warn").hidden = !p.warnings.length;
+  $("#ed-warn").textContent = p.warnings.join(" ");
+  $("#ed-undo").disabled = !ed.edits.length;
+  $("#ed-redo").disabled = !ed.redo.length;
+  $("#ed-reset").disabled = !ed.edits.length;
+}
+
+function closeEditor() {
+  const entry = ed.entry;
+  if (!entry) return;
+  const changed = JSON.stringify(ed.edits) !== JSON.stringify(ed.start);
+  if (changed) {
+    entry.edits = ed.edits.slice();
+    if (state.results.has(entry.name)) toast(`Corrections of ${entry.name} changed: run it again to update its results.`, false, 6000);
+  }
+  ed.editor.cancelOutline();
+  if (engine.ready) engine.call("drop", { name: entry.name }).catch(() => {});
+  ed.entry = null;
+  renderFiles();
+}
+
+async function saveEditorSession() {
+  try {
+    const bytes = await engine.call("sessionFromEdits", { name: ed.entry.name, opts: checkOptions(), edits: ed.edits });
+    download(new Blob([bytes], { type: "application/zip" }), `${ed.entry.name}.otm`);
+    toast(`Saved ${ed.entry.name}.otm: open it in the desktop app (File → Open session), or add it here with its .mat later.`, false, 7000);
+  } catch (e) { toast(`Session not saved: ${e.message}`, true); }
+}
+
+// ============================================================================================
+// HELP, SAMPLE, DIAGNOSTIC REPORT
+// ============================================================================================
+function logEvent(text, details = "") {
+  state.log.push({ time: new Date().toISOString(), text: String(text), details: details ? String(details) : "" });
+  if (state.log.length > 200) state.log.shift();
+}
+
+async function loadSample() {
+  try {
+    const resp = await fetch(new URL("./sample/OTM_sample_Dtect.mat", import.meta.url));
+    if (!resp.ok) throw new Error(`download failed (${resp.status})`);
+    const file = new File([await resp.blob()], "OTM_sample_Dtect.mat");
+    const before = state.files.length;
+    addFiles([file]);
+    const entry = state.files[before];
+    if (entry) { entry.given = "width"; entry.value = "440"; renderFiles(); }
+    $("#help-dialog").close();
+    document.getElementById("files").scrollIntoView();
+    toast("Sample section added (440 × 330 µm). Press Run when it has been checked.");
+  } catch (e) { toast(`The sample could not be loaded: ${e.message}`, true); }
+}
+
+function diagnosticReport() {
+  const i = state.info || {};
+  const L = [
+    "OTM Web diagnostic report",
+    "Send to: abdullah.alshammari@ku.edu.kw, subject: OTM2026",
+    `Created: ${new Date().toString()}`,
+    "",
+    `Page: ${location.href}`,
+    `otm_core ${i.otm_core || "?"} · Python ${i.python || "?"} · Pyodide ${i.pyodide || "?"} · numpy ${i.numpy || "?"} · mesher ${i.mesher || "?"}`,
+    `Engine: ${engine.ready ? `ready (loaded in ${(i.load_seconds || 0).toFixed(1)} s)` : engine.failed ? `failed: ${engine.failed}` : "loading"}`,
+    `Browser: ${navigator.userAgent}`,
+    `Screen: ${screen.width} × ${screen.height} @ ${window.devicePixelRatio}x · memory: ${navigator.deviceMemory ? navigator.deviceMemory + " GB" : "?"} · cores: ${navigator.hardwareConcurrency || "?"}`,
+    `WebGL 2: ${(() => { try { return document.createElement("canvas").getContext("webgl2") ? "yes" : "no"; } catch { return "no"; } })()}`,
+    "",
+    "Files:",
+    ...state.files.map((f) => {
+      const c = f.check, q = c && c.check;
+      return `  ${f.mat.name} (${(f.mat.size / 1e6).toFixed(2)} MB${f.otm ? ", + .otm" : ""}): ${f.status}` +
+        (c ? ` · ${c.image_cols}×${c.image_rows} px, ${c.n_capillaries} capillaries, ${c.n_fibres} fibres, ${c.format}` : "") +
+        (q ? ` · data check ${q.status}${q.issues.length ? " (" + q.issues.map((x) => x.code).join(", ") + ")" : ""}` : "") +
+        (editsOf(f).length ? ` · ${editsOf(f).length} correction(s)` : "") + (f.error ? ` · ${f.error}` : "") +
+        (sizeOf(f) ? ` · ${sizeOf(f).map((v) => v.toFixed(1)).join(" × ")} µm` : "");
+    }),
+    "",
+    "Results:",
+    ...state.order.map((n) => {
+      const r = state.results.get(n);
+      return `  ${n}: ${r.ok ? "ok" : "ERRORS"} in ${(r.seconds || 0).toFixed(0)} s` +
+        (r.timings ? ` (${Object.entries(r.timings).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(", ")})` : "") +
+        (r.errors && r.errors.length ? "\n    " + r.errors.map((e) => e.message).join("\n    ") : "");
+    }),
+    "",
+    "Events of this visit:",
+    ...(state.log.length ? state.log.map((e) => `  ${e.time}  ${e.text}${e.details ? "\n    " + e.details.split("\n").join("\n    ") : ""}`) : ["  (none)"]),
+    "",
+    "Settings:",
+    JSON.stringify(state.info ? { ...settingsFromForm(), ...webOptions() } : {}, null, 2),
+  ];
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  download(new Blob([L.join("\r\n") + "\r\n"], { type: "text/plain" }), `OTM_Web_diagnostic_report_${stamp}.txt`);
+  toast("Report saved. Email it to abdullah.alshammari@ku.edu.kw with the subject OTM2026.", false, 7000);
+}
+
+function setupHelp() {
+  const dlg = $("#help-dialog");
+  $("#help-button").addEventListener("click", () => {
+    $("#about-version").textContent = state.info ? `otm_core ${state.info.otm_core}` : "";
+    dlg.showModal();
+  });
+  for (const b of $$("[data-close]", dlg)) b.addEventListener("click", () => dlg.close());
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  $("#help-sample").addEventListener("click", loadSample);
+  $("#try-sample").addEventListener("click", loadSample);
+  $("#help-report").addEventListener("click", diagnosticReport);
+  window.addEventListener("error", (e) => logEvent(`page error: ${e.message}`, e.error && e.error.stack));
+  window.addEventListener("unhandledrejection", (e) => logEvent(`unhandled: ${e.reason && e.reason.message ? e.reason.message : e.reason}`));
+}
+
+// ============================================================================================
 // start
 // ============================================================================================
 function start() {
   setupFiles();
   wireSettings();
+  setupHelp();
   $("#run-button").addEventListener("click", runAll);
   $("#stop-button").addEventListener("click", () => {
     state.stopRequested = true;
@@ -996,4 +1435,4 @@ if (typeof Worker === "undefined" || typeof WebAssembly === "undefined") {
 } else start();
 
 // for the browser test
-window.__otm = { state, engine, storeResult, selectSample, download: pyDownload };
+window.__otm = { state, engine, storeResult, selectSample, download: pyDownload, ed, openEditor, get view() { return currentView; } };

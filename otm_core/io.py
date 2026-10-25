@@ -29,6 +29,13 @@ class DtectData:
     image_size: tuple                        # MATLAB ImageSize = (rows, cols)
     path: str = ""
     notes: List[str] = field(default_factory=list)
+    # data check (otm_core.qc): numbering in the original file once items are removed,
+    # outlines that could not be read, and a fibre-type count that did not match
+    fiber_ids: Optional[np.ndarray] = None       # (F,) 1-based numbers in the file
+    capillary_ids: Optional[np.ndarray] = None   # (N,) 1-based numbers in the file
+    fiber_read_problems: Optional[List[str]] = None
+    type_count_mismatch: Optional[tuple] = None  # (number of types, number of fibres)
+    removed_fibres: List[Any] = field(default_factory=list)   # (fibre id, ring) removed by the data check
 
     @property
     def has_fibres(self) -> bool:
@@ -66,17 +73,28 @@ def _load_h5(path: str) -> DtectData:
         caps = _points(np.asarray(f["Xcap"][()]).T)            # HDF5 stores the transpose
         image_size = tuple(int(v) for v in _vec(f["ImageSize"][()])[:2])
         fibres: List[np.ndarray] = []
+        problems: List[str] = []
         if "Fibers" in f and isinstance(f["Fibers"], h5py.Group) and "x" in f["Fibers"]:
             g = f["Fibers"]
             xr, yr = np.asarray(g["x"][()]).ravel(), np.asarray(g["y"][()]).ravel()
             for rx, ry in zip(xr, yr):
                 x, y = _vec(f[rx][()]), _vec(f[ry][()])
-                fibres.append(np.column_stack([x, y]))
+                fibres.append(_ring(x, y, problems))
         types = None
         if "FiberTypes" in f:
             t = _vec(f["FiberTypes"][()])
             types = t.astype(int) if t.size else None
-    return DtectData(caps, fibres, types, image_size, path, notes)
+    return DtectData(caps, fibres, types, image_size, path, notes, fiber_read_problems=problems)
+
+
+def _ring(x: np.ndarray, y: np.ndarray, problems: List[str]) -> np.ndarray:
+    """One outline; a broken one is kept (empty) and its problem recorded, so
+    the data check can name it instead of the whole file failing."""
+    if x.size != y.size:
+        problems.append(f"x and y lists of different lengths ({x.size} and {y.size})")
+        return np.zeros((0, 2))
+    problems.append("")
+    return np.column_stack([x, y])
 
 
 def _load_v5(path: str) -> DtectData:
@@ -88,13 +106,14 @@ def _load_v5(path: str) -> DtectData:
     caps = _points(d["Xcap"])
     image_size = tuple(int(v) for v in _vec(d["ImageSize"])[:2])
     fibres: List[np.ndarray] = []
+    problems: List[str] = []
     F = d.get("Fibers")
     if F is not None:
         for s in np.atleast_1d(F):
-            fibres.append(np.column_stack([_vec(s.x), _vec(s.y)]))
+            fibres.append(_ring(_vec(getattr(s, "x", [])), _vec(getattr(s, "y", [])), problems))
     t = d.get("FiberTypes")
     types = _vec(t).astype(int) if t is not None and np.size(t) else None
-    return DtectData(caps, fibres, types, image_size, path, [])
+    return DtectData(caps, fibres, types, image_size, path, [], fiber_read_problems=problems)
 
 
 def load_dtect_mat(path: str) -> DtectData:
@@ -110,7 +129,10 @@ def load_dtect_mat(path: str) -> DtectData:
     data = _load_h5(path) if is_hdf5_mat(path) else _load_v5(path)
     if data.fiber_types is not None and len(data.fiber_types) != len(data.fibers_px):
         data.notes.append(f"{len(data.fiber_types)} fibre types for {len(data.fibers_px)} fibres: types ignored")
+        data.type_count_mismatch = (len(data.fiber_types), len(data.fibers_px))
         data.fiber_types = None
+    data.fiber_ids = np.arange(1, len(data.fibers_px) + 1)
+    data.capillary_ids = np.arange(1, len(data.capillaries_px) + 1)
     return data
 
 

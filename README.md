@@ -8,12 +8,17 @@ OTM Web models oxygen transport in muscle tissue, in a web browser. It runs the 
 
 ## Using it
 
-1. **Files:** drop one or more `.mat` exports onto the page. Each file is checked on arrival, showing its image size, capillaries, fibres and fibre types. To apply corrections made in the desktop app, also add its `.otm` session with the same name.
+1. **Files:** drop one or more `.mat` exports onto the page (or **Try the sample section**). Each file is read and run through the desktop's **data check** on arrival (the same 22 problem codes as OTM 2026 and OTM Lite), showing its image size, capillaries, fibres, fibre types and any segmentation problems.
+   - **Correct…** opens the file as a run will use it, with the flagged items marked, and the desktop's eight correction tools: add, remove and move capillaries; set fibre type; delete, draw and redraw fibres; undo/redo. **Save session (.otm)** keeps the corrections for the desktop app. Corrections made in the desktop app come in with its `.otm` of the same name.
    - In the file table, type each image's width or height in µm; the other side is calculated from the image shape. **Same for all** copies one file's size to the rest, and sizes can be loaded from or saved to a dimensions CSV.
-2. **Settings:** tissue type, region of interest, biophysical parameters and exercise level, analysis steps, and figure style.
+2. **Settings:** tissue type, region of interest (central 60 %, edges in µm, or shares of the image), what to do with segmentation errors (remove the flagged items, skip the file, or keep them where allowed), biophysical parameters and exercise level, analysis steps, and figure style. **Advanced settings:** retouch, mesh, flux lines (lines per capillary, length cap, integrator, legacy MATLAB mode) and session files.
    - Settings save and load as the same JSON the desktop batch runner (`python -m otm_core run --settings`) reads.
 3. **Run:** samples run one after another, with progress for each. A whole sample with figures takes about 1.5 minutes.
-4. **Results:** a row per sample, then for the selected sample its tables (hypoxic compartments in coral) and figures. **Download all results (ZIP)** holds, per sample, the `INDICES` and `PO2` folders exactly as the desktop app writes them, plus `OTM_batch_summary.xlsx`/`.csv` and the settings.
+4. **Results:** a row per sample, then for the selected sample what the data check did, the **tissue view**, its tables (hypoxic compartments in coral) and figures.
+   - The tissue view is the desktop's view as an interactive map: PO₂, O₂ consumption or fibre types, with fibres, capillaries, flux lines, capillary domains, ROI and mesh as layers; zoom, pan, a read-out of PO₂ and the fibre under the cursor, a fixed colour range that says how much of the sample falls outside it, µm or model units, and **Save PNG**.
+   - **Save session (.otm)** opens the sample in the desktop app with its mesh, PO₂ and flux lines.
+   - **Download all results (ZIP)** holds, per sample, the `INDICES` and `PO2` folders exactly as the desktop app writes them (with the data-check report and the session), plus `OTM_batch_summary.xlsx`/`.csv` and the settings.
+5. **Help:** quick start, the sample section, a **diagnostic report** to email with a question, and About (credits and contact).
 
 The first visit downloads about 45 MB (Python and its scientific libraries); the top-right corner shows how far it has got. The browser keeps it, so later visits (also after the site is updated) start in about 10 seconds.
 
@@ -25,8 +30,8 @@ The first visit downloads about 45 MB (Python and its scientific libraries); the
   - tissue mean PO₂ within 0.014 %
   - per-fibre PO₂ within 0.006 mmHg
   - LCFR identical
-- **No editing:** corrections are made in the desktop app and brought in with its `.otm` file.
-- **Figures:** they come out as files. The interactive PO₂ map is planned next.
+- **Not in the browser yet:** the experiment batch over a folder tree (grouped summaries); run several files instead, or use the desktop app.
+- **The tissue view is 2-D** (the desktop's view is 3-D with the same layers).
 
 ## Publishing on GitHub Pages
 
@@ -42,7 +47,7 @@ The repository is the website; nothing needs building.
 ## Updating
 
 - **otm_core changed on the desktop:** `python tools/build_site.py --otm-core "<OTM folder>/otm_core"` copies it in and refreshes `app/python-files.json`. Then commit and push.
-- **Test before pushing:** `python tests/browser_test.py --sample <sample.mat> --baseline <baseline_small.json>`. It needs Playwright and runs the whole workflow in headless Chromium, checking the results against the MATLAB baseline.
+- **Test before pushing:** `python tests/browser_test.py --sample <sample.mat> --baseline <baseline_small.json>`. It needs Playwright and runs the whole workflow in headless Chromium, checking the results against the MATLAB baseline. Then `python tests/features_test.py` (no arguments) for the data check, editor, tissue view and the rest.
 
 ## What is where
 
@@ -50,13 +55,18 @@ The repository is the website; nothing needs building.
 | --- | --- |
 | `index.html`, `app/app.js`, `app/style.css` | The page: files, settings, run, results |
 | `app/worker.js` | Background worker that loads Pyodide, otm_core and Triangle and runs the analysis |
-| `app/otm_web.py` | Python glue: file checks, runs, tables, the ZIP |
+| `app/otm_web.py` | Python glue: file and data checks, the editor's data, runs, the tissue view's data, sessions, the ZIP |
+| `app/viewer.js` | Tissue view (WebGL map with a 2-D canvas for outlines and lines) |
+| `app/editor.js` | Corrections editor |
+| `app/colormaps.js` | The figures' colour maps (generated from matplotlib) |
+| `app/sample/` | The sample section (2022 regression sample, 440 × 330 µm) |
 | `app/triangle.*` | Triangle mesher (WebAssembly, from `triangle-wasm`, memory limit raised) |
 | `otm_core/` | The OTM analysis package, the same code as the desktop app |
 | `pyodide/` | Pyodide 314.0.7 runtime and the packages OTM needs |
 | `wheels/` | scikit-fem, openpyxl and et-xmlfile (pure-Python wheels) |
 | `tools/build_site.py` | Copies otm_core in and lists the Python files the page loads |
-| `tests/browser_test.py` | End-to-end browser test |
+| `tests/browser_test.py` | End-to-end browser test against the MATLAB baseline |
+| `tests/features_test.py` | End-to-end test of the data check, editor, advanced settings, tissue view, sessions and Help |
 
 ## Licences
 
