@@ -591,11 +591,14 @@ def run_experiment(files: Sequence[str], settings: Any = None, root: Optional[st
                 except Exception as exc:                            # a table must not stop the batch
                     log.append(f"    table not made for {gi.samples[i]}: {type(exc).__name__}: {exc}")
         checks += [{**prefix, **x} for x in data_check_rows(r.data_check, row["status"])]
+        warn = r.demand.warning if r.demand is not None else ""
         results.append(r.light())
         msg = "ok" if r.ok else "; ".join(f"{k}: {v}" for k, v in r.errors.items())
         log.append(f"[{i + 1}/{n}] {gi.samples[i]}: {msg} ({time.perf_counter() - t1:.1f} s)")
         for w in r.edit_warnings:
             log.append(f"    {w}")
+        if warn:
+            log.append(f"    {warn}")
         del r
         if on_result:
             on_result(i, n, results[-1])

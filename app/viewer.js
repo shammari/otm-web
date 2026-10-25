@@ -127,6 +127,7 @@ export class TissueView {
       <div class="tv-bar">
         <label>Show <select class="tv-map" aria-label="Map">
           <option value="po2">PO₂ map</option><option value="vo2">O₂ consumption map</option>
+          <option value="lambda">Oxygen demand Λ per fibre</option>
           <option value="types">Fibre types</option><option value="none">Outlines only</option></select></label>
         <span class="tv-layers">
           <label><input type="checkbox" data-layer="fibres"> Fibres</label>
@@ -262,7 +263,7 @@ export class TissueView {
     const hasPo2 = !!(hasMesh && a.po2);
     const hasVo2 = !!(hasMesh && a.vo2_tri);
     // choices that exist for this sample
-    for (const o of this.el.map.options) o.disabled = (o.value === "po2" && !hasPo2) || (o.value === "vo2" && !hasVo2) || (o.value === "types" && !head.n_fibres);
+    for (const o of this.el.map.options) o.disabled = (o.value === "po2" && !hasPo2) || (o.value === "vo2" && !hasVo2) || (o.value === "types" && !head.n_fibres) || (o.value === "lambda" && !a.fib_lambda);
     if (this.el.map.selectedOptions[0] && this.el.map.selectedOptions[0].disabled) this.layers.map = hasPo2 ? "po2" : head.n_fibres ? "types" : "none";
     if (!hasPo2 && this.layers.map === "po2") this.layers.map = head.n_fibres ? "types" : "none";
     this.el.map.value = this.layers.map;
@@ -399,6 +400,10 @@ export class TissueView {
       return [Math.max(0, r[0]), r[1] > r[0] ? r[1] : r[0] + 1];
     }
     if (m === "vo2") return this._vo2Range || [0, 1];
+    if (m === "lambda" && this.data && this.data.head.lambda_range) {
+      const r = this.data.head.lambda_range;
+      return [0, r[1] > 0 ? r[1] : 1];
+    }
     return null;
   }
 
@@ -406,7 +411,7 @@ export class TissueView {
     const m = this.layers.map;
     if (m === "vo2") this._vo2Buffers();
     const r = this._currentRange();
-    const mapOn = r && (m === "po2" || m === "vo2") && this.data;
+    const mapOn = r && (m === "po2" || m === "vo2" || m === "lambda") && this.data;
     this.el.cbar.hidden = !mapOn;
     this.el.range.hidden = m !== "po2";
     if (mapOn) {
@@ -414,7 +419,8 @@ export class TissueView {
       const d = m === "po2" ? 1 : 2;
       this.el.clo.textContent = fmtNum(r[0], d);
       this.el.chi.textContent = fmtNum(r[1], d);
-      this.el.cunit.textContent = m === "po2" ? "PO₂ (mmHg)" : "O₂ consumption (ml O₂/100 ml/min)";
+      this.el.cunit.textContent = m === "po2" ? "PO₂ (mmHg)" : m === "vo2" ? "O₂ consumption (ml O₂/100 ml/min)"
+        : `Λ per fibre (section ${fmtNum(this.data.head.lambda_tissue, 3)}, ${fmtNum(this.data.head.lambda_ratio, 2)} × rest)`;
     }
     // legend for fibre types
     const types = m === "types" || m === "none";
@@ -635,7 +641,8 @@ export class TissueView {
       }
       if (loc && a.vo2_tri) parts.push(`O₂ consumption ${fmtNum(a.vo2_tri[loc.t], 3)} ml/100 ml/min`);
       const f = this.fibreAt(x, y);
-      parts.push(f ? `fibre ${f.owner + 1}, type ${TYPE_NAMES[f.type] ?? "?"}` : (this.data.head.n_fibres ? "interstitial space" : ""));
+      parts.push(f ? `fibre ${f.owner + 1}, type ${TYPE_NAMES[f.type] ?? "?"}` + (a.fib_lambda ? `, Λ ${fmtNum(a.fib_lambda[f.owner], 3)}` : "")
+        : (this.data.head.n_fibres ? "interstitial space" : ""));
     }
     this.el.readout.textContent = parts.filter(Boolean).join(" · ");
   }
@@ -658,7 +665,7 @@ export class TissueView {
     const c = this.el.gl;
     gl.viewport(0, 0, c.width, c.height);
     const m = this.layers.map;
-    const light = m === "types" || m === "none" || !this._gpu.pos;
+    const light = m === "types" || m === "none" || m === "lambda" || !this._gpu.pos;
     const bg = light ? [0.96, 0.97, 0.98] : [0.08, 0.09, 0.13];
     gl.clearColor(bg[0], bg[1], bg[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -731,6 +738,17 @@ export class TissueView {
     ctx.strokeStyle = onMap ? "rgba(255,255,255,0.35)" : "#9aa3b2";
     ctx.lineWidth = 1;
     ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    // Λ per fibre
+    if (m === "lambda" && a.fib_lambda) {
+      const [lo, hi] = this._currentRange();
+      const cl = lut(this.colormap);
+      for (const f of this._fibres) {
+        const t = Math.max(0, Math.min(1, (a.fib_lambda[f.owner] - lo) / (hi - lo)));
+        const k = Math.round(t * 255) * 3;
+        ctx.fillStyle = `rgb(${cl[k]},${cl[k + 1]},${cl[k + 2]})`;
+        ctx.beginPath(); this._path(ctx, f.pts, true); ctx.fill();
+      }
+    }
     // fibre-type fill
     if (m === "types" && this._fibres.length) {
       for (const f of this._fibres) {
@@ -816,7 +834,8 @@ export class TissueView {
     const dpr = window.devicePixelRatio || 1;
     const { W, H } = this._size();
     const r = this._currentRange();
-    const mapOn = r && ((this.layers.map === "po2" && this.data.arrays.po2) || (this.layers.map === "vo2" && this.data.arrays.vo2_tri));
+    const mapOn = r && ((this.layers.map === "po2" && this.data.arrays.po2) || (this.layers.map === "vo2" && this.data.arrays.vo2_tri)
+      || (this.layers.map === "lambda" && this.data.arrays.fib_lambda));
     const extra = mapOn ? 46 : 0;
     const c = document.createElement("canvas");
     c.width = Math.round(W * dpr);
@@ -841,7 +860,7 @@ export class TissueView {
       ctx.fillText(fmtNum(r[0], d), x0, y0 + 27);
       const hi = fmtNum(r[1], d);
       ctx.fillText(hi, x0 + bw - ctx.measureText(hi).width, y0 + 27);
-      ctx.fillText(this.layers.map === "po2" ? "PO₂ (mmHg)" : "O₂ consumption (ml O₂/100 ml/min)", x0 + bw + 14, y0 + 11);
+      ctx.fillText(this.layers.map === "po2" ? "PO₂ (mmHg)" : this.layers.map === "vo2" ? "O₂ consumption (ml O₂/100 ml/min)" : "Oxygen demand Λ per fibre", x0 + bw + 14, y0 + 11);
     }
     c.toBlob((blob) => {
       const a = document.createElement("a");

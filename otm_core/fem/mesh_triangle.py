@@ -269,8 +269,11 @@ def build_tissue_mesh_triangle(model: Any, settings: Any = None, plan: Any = Non
     thin = _thin_channels(plan, s.gap_width)
 
     q = f"q{min_angle:g}"
+    # Triangle's -a is a maximum area: its triangles come out smaller than gmsh's for the same size
+    # field, so the area limit is scaled to give about gmsh's node count (MeshSettings.triangle_area_factor)
+    af = float(getattr(s, "triangle_area_factor", 1.0))
     report(progress, 0.2, "Generating the triangle mesh (Triangle)")
-    out = run(f"pzAQ{q}a{_SQ3_4 * s.h_max ** 2:.12g}",
+    out = run(f"pzAQ{q}a{af * _SQ3_4 * s.h_max ** 2:.12g}",
               {"pointlist": np.asarray(P.points, float), "segmentlist": seg, "segmentmarkerlist": mark,
                "holelist": holes, "regionlist": regions})
     passes = 0
@@ -278,7 +281,7 @@ def build_tissue_mesh_triangle(model: Any, settings: Any = None, plan: Any = Non
         pts = np.asarray(out["pointlist"], float).reshape(-1, 2)
         tri = np.asarray(out["trianglelist"], np.int32).reshape(-1, 3)
         cen = pts[tri].mean(axis=1)
-        target = _SQ3_4 * _target_size(cen, plan, s, h_wall, thin) ** 2
+        target = af * _SQ3_4 * _target_size(cen, plan, s, h_wall, thin) ** 2
         p3 = pts[tri]
         area = 0.5 * np.abs((p3[:, 1, 0] - p3[:, 0, 0]) * (p3[:, 2, 1] - p3[:, 0, 1])
                             - (p3[:, 2, 0] - p3[:, 0, 0]) * (p3[:, 1, 1] - p3[:, 0, 1]))

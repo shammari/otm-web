@@ -228,6 +228,36 @@ def main() -> int:
         page.dispatch_event("#flux-cap", "change")
         page.uncheck("#figures")
 
+        print("4b oxygen demand Λ and parallel samples")
+        page.click('label:has(input[name="tissue"][value="cardiac"])')
+        page.select_option("#exercise", "low")
+        page.dispatch_event("#exercise", "change")
+        est = page.inner_text("#dm-estimate")
+        check("5.00 × rest" in est and "Warning:" in est and "cardiac level “Low”" in est,
+              f"cardiac Low: Λ will switch MM and Mb on, with a warning ({est})")
+        page.click('label:has(input[name="tissue"][value="skeletal"])')
+        page.select_option("#exercise", "resting")
+        page.dispatch_event("#exercise", "change")
+        check(page.input_value("#preset") == "skeletal" and "1.00 × rest" in page.inner_text("#dm-estimate"),
+              "back to skeletal Resting with its defaults")
+        page.fill("#p-M0", "4.71e-4")                         # 3 x the resting M0, exercise level Resting
+        page.dispatch_event("#p-M0", "input")
+        est = page.inner_text("#dm-estimate")
+        check("3.00 × rest" in est and "non-resting" in est and "Warning:" in est and "will switch them on" in est,
+              f"Λ estimate in the settings ({est})")
+        page.uncheck("#dm-enabled")
+        page.dispatch_event("#dm-enabled", "input")
+        check("only reported" in page.inner_text("#dm-estimate") and page.is_disabled("#dm-uptake"), "legacy switch")
+        page.check("#dm-enabled")
+        page.dispatch_event("#dm-enabled", "input")
+        with page.expect_download() as d:
+            page.click("#save-settings")
+        sj = json.loads(Path(d.value.path()).read_text())
+        check(sj.get("demand") == {"enabled": True, "cutoff": 1.5, "switch_uptake": True}
+              and RunSettings.from_dict(sj).demand.enabled, "demand settings in the JSON, read by the batch runner")
+        page.select_option("#parallel", "2")
+        page.dispatch_event("#parallel", "change")
+
         print("5  run")
         page.click("#run-button")
         page.wait_for_function("!window.__otm.state.running && window.__otm.state.results.size == 2", timeout=900_000)
@@ -242,7 +272,16 @@ def main() -> int:
                       f"{r['flux']['moving_lines']} moving from {r['flux']['seed_capillaries']}" for r in res.values()) + ")")
         check(all(any(f.endswith(".otm") for f in r["files"]) for r in res.values()), "a session (.otm) per sample")
         for n, r in res.items():
-            print(f"    {n}: {r['seconds']:.0f} s, view {r['view'] and r['view'].get('n_nodes')} nodes")
+            print(f"    {n}: {r['seconds']:.0f} s on the {r.get('worker')} worker, view {r['view'] and r['view'].get('n_nodes')} nodes")
+        check(sorted(r.get("worker") for r in res.values()) == ["extra", "main"], "the two samples ran in two workers at once")
+        dm = [r["demand"] for r in res.values()]
+        check(all(abs(x["lambda_ratio"] - 3) < 1e-6 and x["uptake_switched_by_lambda"] and x["demand_regime"] == "non-resting"
+                  for x in dm), "Λ = 3 × rest at Resting: MM and Mb switched on in both runs")
+        check(all(abs(r["flux"]["cap_um"] - 30.2) < 1.5 for r in res.values()),
+              "automatic flux-line cap stays the resting one (" + ", ".join(f"{r['flux']['cap_um']:.1f} µm" for r in res.values()) + ")")
+        check(all(any(f.endswith("_Lambda.csv") for f in r["files"]) for r in res.values()), "Λ table per fibre written")
+        lam_cells = [page.inner_text(f'#overview tr[data-name="{n}"] td:nth-child(5)') for n in res]
+        check(lam_cells == ["3.00", "3.00"], f"Λ × rest column in the overview ({lam_cells})")
 
         print("6  tissue view")
         page.locator('#overview tr[data-name="flawed"]').click()
@@ -290,6 +329,12 @@ def main() -> int:
         page.select_option(".tv-map", "vo2")
         time.sleep(0.5)
         check("consumption" in page.inner_text(".tv-cunit"), "VO2 map with its unit")
+        page.select_option(".tv-map", "lambda")
+        time.sleep(0.3)
+        check("Λ per fibre" in page.inner_text(".tv-cunit") and "3.00 × rest" in page.inner_text(".tv-cunit"),
+              "Λ-per-fibre map with the section's value")
+        dmr = page.inner_text(".demand-result")
+        check("switched on" in dmr and "⚠ Warning: the oxygen demand is 3.00" in dmr, "results warn that Λ switched MM and Mb on")
         page.select_option(".tv-map", "types")
         time.sleep(0.3)
         check(page.locator(".tv-legend span").count() >= 3, "fibre-type map with a legend")

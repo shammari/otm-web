@@ -109,6 +109,8 @@ const state = {
   extras: {},           // settings from a loaded JSON the form does not show (mesh, flux, retouch ...)
   figureCache: new Map(),
   views: new Map(),     // sample -> parsed tissue view (the last few)
+  packs: new Map(),     // sample run in an extra worker -> its files (until the main worker has them)
+  unpacks: [],          // moves to the main worker still going on
   viewRange: undefined, // PO2 colour range of the tissue views (undefined: the one in the settings)
   viewColormap: null,
   log: [],              // errors and warnings of this visit, for the diagnostic report
@@ -176,9 +178,9 @@ function addFiles(list) {
   for (const f of added) checkFile(f);
 }
 
-async function putFile(entry) {
-  await engine.call("put", { name: entry.name, ext: ".mat", buffer: await entry.mat.arrayBuffer() });
-  if (entry.otm) await engine.call("put", { name: entry.name, ext: ".otm", buffer: await entry.otm.arrayBuffer() });
+async function putFile(entry, eng = engine) {
+  await eng.call("put", { name: entry.name, ext: ".mat", buffer: await entry.mat.arrayBuffer() });
+  if (entry.otm) await eng.call("put", { name: entry.name, ext: ".otm", buffer: await entry.otm.arrayBuffer() });
 }
 
 async function checkFile(entry) {
@@ -499,6 +501,35 @@ function updateExercise() {
   }
 }
 
+// Λ relative to rest before a run: exercise × M0 / (K·Pcap) against the tissue's resting defaults
+// (type-I coefficients; the run computes it per fibre, with the section's fibre sizes and types)
+function updateDemand() {
+  if (!state.info) return;
+  $("#dm-options").classList.toggle("off", !$("#dm-enabled").checked);
+  for (const e of $$("#dm-options input")) e.disabled = !$("#dm-enabled").checked;
+  const tissue = radio("tissue");
+  const level = $("#exercise").value || "resting";
+  const sw = state.info.exercise[tissue][level];
+  const p = readParams(), d = presetValues(tissue);
+  const K = (q) => q.alpha * q.D + q.c_Mb * q.D_Mb / q.P50_Mb;
+  const ratio = (sw.demand * p.M0 / (K(p) * p.Pcap)) / (d.M0 / (K(d) * d.Pcap));
+  const box = $("#dm-estimate");
+  box.classList.remove("switch");
+  if (!Number.isFinite(ratio)) { box.textContent = ""; return; }
+  const cutoff = num($("#dm-cutoff").value) || 1.5;
+  const non = ratio > cutoff;
+  box.textContent = "";
+  box.append("Demand about ", el("b", { text: `${ratio.toFixed(2)} × rest` }), `: ${non ? "non-resting" : "resting"}`);
+  if (!$("#dm-enabled").checked) { box.append(" (Λ only reported)."); return; }
+  const off = [!sw.michaelis_menten && "Michaelis–Menten uptake", !sw.myoglobin && "myoglobin facilitation"].filter(Boolean);
+  if (non && off.length && $("#dm-uptake").checked) {
+    const lvl = $("#exercise").selectedOptions[0]?.textContent || level;
+    box.append(". ", el("b", { text: "Warning:" }),
+      ` the ${tissue} level “${lvl}” solves without ${off.join(" and ")}; Λ will switch ${off.length > 1 ? "them" : "it"} on.`);
+    box.classList.add("switch");
+  } else box.append(".");
+}
+
 function buildParamGrid() {
   const box = $("#params");
   box.textContent = "";
@@ -557,6 +588,8 @@ function settingsFromForm() {
     figure_formats: $$("#formats input:checked").map((i) => i.value),
     po2_range_mmHg: radio("range") === "fixed" ? [num($("#range-lo").value), num($("#range-hi").value)] : null,
     data_check: radio("dcheck"),
+    demand: { enabled: $("#dm-enabled").checked, cutoff: num($("#dm-cutoff").value) ?? 1.5,
+              switch_uptake: $("#dm-uptake").checked },
   };
   if (state.info) Object.assign(s, advancedFromForm());
   // a fixed flux-line cap is typed in µm; the settings hold it in model units (half the tissue
@@ -647,7 +680,7 @@ function applyAdvanced() {
     const a = advancedFromForm();
     const changed = JSON.stringify([a.retouch, a.mesh]) !== JSON.stringify([{ ...d.retouch, ...(state.extras.retouch || {}) }, { ...d.mesh, ...(state.extras.mesh || {}) }])
       || a.flux.lines_per_capillary !== d.flux.lines_per_capillary || a.flux.integrator !== d.flux.integrator || legacy
-      || $("#flux-cap").value !== "auto" || !$("#save-session").checked;
+      || $("#flux-cap").value !== "auto" || !$("#save-session").checked || $("#parallel").value !== "auto";
     $("#advanced summary .hint").textContent = changed ? "changed from the defaults" : "retouch, mesh, flux lines, session files";
     $("#advanced").classList.toggle("changed", changed);
   }
@@ -677,6 +710,10 @@ function fillForm(d) {
   } else setRadio("roi", "default");
   applyRoi();
   setRadio("dcheck", d.data_check || "fix");
+  const dm = { enabled: true, cutoff: 1.5, switch_uptake: true, ...(d.demand || {}) };
+  $("#dm-enabled").checked = dm.enabled !== false;
+  $("#dm-uptake").checked = dm.switch_uptake !== false;
+  $("#dm-cutoff").value = dm.cutoff;
   fillAdvanced(d);
   const tissue = d.tissue || "skeletal";
   const values = { ...presetValues(tissue), ...(d.parameters || {}) };
@@ -710,7 +747,7 @@ function fillForm(d) {
 
 const FORM_KEYS = new Set(["tissue", "use_fibre_types", "width_um", "height_um", "roi_um", "roi_fraction", "parameters",
   "exercise", "non_uniform", "differential_extraction", "steps", "figures", "dpi", "colormap", "figure_layout",
-  "figure_width", "figure_formats", "po2_range_mmHg", "data_check"]);
+  "figure_width", "figure_formats", "po2_range_mmHg", "data_check", "demand"]);
 // retouch, mesh and flux are shown in part (Advanced settings): the rest of each is kept as loaded
 const PARTLY_SHOWN = ["retouch", "mesh", "flux"];
 
@@ -764,9 +801,12 @@ function validate() {
     const lo = num($("#range-lo").value), hi = num($("#range-hi").value);
     if (lo === null || hi === null || !(hi > lo)) msgs.push("the fixed PO₂ range needs a lowest value below the highest");
   }
+  const co = num($("#dm-cutoff").value);
+  if ($("#dm-enabled").checked && (co === null || Number.isNaN(co) || co <= 1)) msgs.push("the demand cut-off must be above 1 × the resting Λ");
   const de = num($("#diff-extraction").value);
   if (radio("tissue") === "skeletal" && (de === null || de < 0.1 || de > 10)) msgs.push("differential extraction must be between 0.1 and 10");
   updateExercise();
+  updateDemand();
   const box = $("#settings-error");
   box.hidden = !msgs.length;
   box.textContent = msgs.length ? "Fix before running: " + msgs.join("; ") + "." : "";
@@ -804,6 +844,7 @@ function wireSettings() {
   $("#figures").addEventListener("change", () => { applyFigureOptions(); validate(); });
   for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction"]) $(id).addEventListener("input", validate);
   $("#exercise").addEventListener("change", validate);
+  for (const id of ["#dm-enabled", "#dm-uptake", "#dm-cutoff"]) $(id).addEventListener("input", validate);
   $("#preset").addEventListener("change", () => {
     const p = $("#preset").value;
     if (p !== "custom") writeParams(presetValues(p));
@@ -876,7 +917,7 @@ function updateRunState() {
 }
 
 const STEP_LABELS = { load: "Reading the file", geometry: "Tissue size and region", indices: "Supply indices",
-  mesh: "Meshing", po2: "Solving PO₂", flux: "Flux lines", export: "Writing tables and figures", done: "Done",
+  mesh: "Meshing", po2: "Solving PO₂", flux: "Flux lines", export: "Writing tables", figures: "Writing figures (results shown)", done: "Done",
   "finished with errors": "Finished with errors" };
 const progressRows = new Map();
 
@@ -901,6 +942,91 @@ function updateProgress(name, f, msg) {
   $(".bar i", row).style.width = `${Math.round(Math.max(0, Math.min(1, f)) * 100)}%`;
 }
 
+// ---- several samples at once: extra workers, each with its own Python ------------------------
+function parallelCount(nFiles) {
+  const choice = $("#parallel").value;
+  if (choice !== "auto") return Math.max(1, Math.min(Number(choice), nFiles));
+  const cores = navigator.hardwareConcurrency || 2;
+  const mem = navigator.deviceMemory;                 // GB, Chrome and Edge only (capped at 8)
+  if (nFiles < 2 || cores < 4 || (mem !== undefined && mem < 8)) return 1;
+  return Math.min(nFiles, cores >= 8 ? 3 : 2);
+}
+
+function extraEngine() {
+  const e = new Engine();
+  e.onProgress = (p) => updateProgress(p.name, p.f, p.msg);
+  return e;
+}
+
+// a ZIP written with ZIP_STORED by otm_web.pack: name -> bytes (no copy)
+function readStoredZip(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const out = new Map();
+  let i = 0;
+  const dec = new TextDecoder();
+  while (i + 30 <= u8.length && dv.getUint32(i, true) === 0x04034b50) {
+    const method = dv.getUint16(i + 8, true), size = dv.getUint32(i + 18, true);
+    const nlen = dv.getUint16(i + 26, true), xlen = dv.getUint16(i + 28, true);
+    const name = dec.decode(u8.subarray(i + 30, i + 30 + nlen));
+    const start = i + 30 + nlen + xlen;
+    if (method !== 0) throw new Error("packed sample is compressed");
+    out.set(name, u8.subarray(start, start + size));
+    i = start + size;
+  }
+  return out;
+}
+
+async function runOne(f, base, eng) {
+  const row = progressRow(f.name);
+  row.className = "";
+  const started = performance.now();
+  const clock = setInterval(() => { $(".ptime", row).textContent = `${((performance.now() - started) / 1000).toFixed(0)} s`; }, 500);
+  setOverviewRow(f.name, { name: f.name, running: true });
+  try {
+    await putFile(f, eng);
+    const later = $("#figures").checked;
+    const res = await eng.call("run", { name: f.name, settings: { ...settingsForFile(f, base), ...webOptions(), figures_later: later }, edits: f.edits });
+    res.file = f.mat.name;
+    res.seconds_tables = res.seconds;
+    res.worker = eng === engine ? "main" : "extra";
+    if (eng !== engine) res.owner = "extra";
+    state.packs.delete(f.name);
+    storeResult(res);                                 // the numbers now, the figures below
+    if (res.figures_pending) {
+      $(".pstep", row).textContent = "Results shown · writing figures…";
+      const fr = await eng.call("figures", { name: f.name });
+      res.files = fr.files;
+      if (!fr.ok) { res.ok = false; res.errors = [...(res.errors || []), { step: "export", message: fr.error }]; }
+      res.seconds = (performance.now() - started) / 1000;
+    }
+    if (eng !== engine) {                             // the main worker keeps every result (files, ZIP)
+      const bytes = await eng.call("pack", { name: f.name });
+      const files = readStoredZip(bytes);
+      state.packs.set(f.name, files);
+      delete res.owner;
+      const copy = bytes.slice();
+      state.unpacks.push(engine.call("unpack", { name: f.name, buffer: copy.buffer }, [copy.buffer])
+        .then(() => state.packs.delete(f.name))
+        .catch((e) => logEvent(`moving ${f.name} to the main worker: ${e.message}`)));
+      eng.call("forget", { name: f.name }).catch(() => {});
+    }
+    updateResult(res);
+    row.classList.add(res.ok ? "done" : "failed");
+    $(".pstep", row).textContent = res.ok ? `Done · ${res.files.length} files written` : res.errors.map((e) => e.message).join(" · ");
+    $(".bar i", row).style.width = "100%";
+  } catch (e) {
+    row.classList.add("failed");
+    $(".pstep", row).textContent = `Failed: ${e.message}`;
+    storeResult({ name: f.name, ok: false, errors: [{ step: "run", message: e.message }], files: [], summary: null, seconds: (performance.now() - started) / 1000 });
+    logEvent(`run ${f.name}: ${e.message}`, e.details);
+    if (eng.failed) throw e;
+  } finally {
+    clearInterval(clock);
+    $(".ptime", row).textContent = `${((performance.now() - started) / 1000).toFixed(0)} s`;
+    eng.call("drop", { name: f.name }).catch(() => {});
+  }
+}
+
 async function runAll() {
   if (!validate()) return;
   const files = runnable();
@@ -918,42 +1044,32 @@ async function runAll() {
   for (const f of files) progressRow(f.name);
   updateRunState();
   const t0 = performance.now();
-  for (const f of files) {
-    if (state.stopRequested) {
-      const row = progressRow(f.name);
-      $(".pstep", row).textContent = "Not run (stopped)";
-      continue;
+  const queue = files.slice();
+  const loop = async (eng) => {
+    while (queue.length && !state.stopRequested) {
+      const f = queue.shift();
+      try { await runOne(f, base, eng); } catch { return; }       // this worker stopped working
     }
-    const row = progressRow(f.name);
-    row.className = "";
-    const started = performance.now();
-    runClock = setInterval(() => { $(".ptime", row).textContent = `${((performance.now() - started) / 1000).toFixed(0)} s`; }, 500);
-    setOverviewRow(f.name, { name: f.name, running: true });
-    try {
-      await putFile(f);
-      const res = await engine.call("run", { name: f.name, settings: { ...settingsForFile(f, base), ...webOptions() }, edits: f.edits });
-      res.file = f.mat.name;
-      storeResult(res);
-      row.classList.add(res.ok ? "done" : "failed");
-      $(".pstep", row).textContent = res.ok ? `Done · ${res.files.length} files written` : res.errors.map((e) => e.message).join(" · ");
-      $(".bar i", row).style.width = "100%";
-    } catch (e) {
-      row.classList.add("failed");
-      $(".pstep", row).textContent = `Failed: ${e.message}`;
-      storeResult({ name: f.name, ok: false, errors: [{ step: "run", message: e.message }], files: [], summary: null, seconds: (performance.now() - started) / 1000 });
-      logEvent(`run ${f.name}: ${e.message}`, e.details);
-      if (engine.failed) { clearInterval(runClock); break; }
-    } finally {
-      clearInterval(runClock);
-      $(".ptime", row).textContent = `${((performance.now() - started) / 1000).toFixed(0)} s`;
-      engine.call("drop", { name: f.name }).catch(() => {});
-    }
+  };
+  const n = parallelCount(files.length);
+  const extras = [];
+  const loops = [loop(engine)];
+  for (let k = 1; k < n; k++) {
+    const e = extraEngine();
+    extras.push(e);
+    loops.push(e.started.then(() => loop(e)).catch((err) => logEvent(`extra worker ${k}: ${err.message}`)));
   }
+  if (n > 1) toast(`Running ${n} samples at a time (each in its own worker).`);
+  await Promise.all(loops);
+  for (const f of queue) $(".pstep", progressRow(f.name)).textContent = "Not run (stopped)";
+  await Promise.all(state.unpacks);
+  state.unpacks = [];
+  for (const e of extras) e.worker.terminate();     // give their memory back
   state.running = false;
   updateRunState();
-  const n = files.length;
   const failed = files.filter((f) => state.results.get(f.name) && !state.results.get(f.name).ok).length;
-  toast(`Run finished in ${((performance.now() - t0) / 1000).toFixed(0)} s: ${n - failed} of ${n} sample(s) without errors.`, failed > 0, 6000);
+  const done = files.filter((f) => state.results.has(f.name)).length;
+  toast(`Run finished in ${((performance.now() - t0) / 1000).toFixed(0)} s: ${done - failed} of ${files.length} sample(s) without errors.`, failed > 0, 6000);
 }
 
 // ============================================================================================
@@ -968,6 +1084,25 @@ function storeResult(res) {
   setOverviewRow(res.name, res);
   if (!state.selected || state.selected === res.name) selectSample(res.name);
   $("#results-hint").textContent = "Click a sample to see its tables and figures. The ZIP holds, per sample, the INDICES and PO2 folders the desktop app writes, plus the batch summary spreadsheet.";
+}
+
+// the figures of a result arrived (or it changed after the run): refresh what shows its files
+function updateResult(res) {
+  state.results.set(res.name, res);
+  setOverviewRow(res.name, res);
+  if (state.selected !== res.name) return;
+  const node = $("#sample-view .sample");
+  if (!node) return;
+  const fresh = $("#tpl-sample").content.firstElementChild.cloneNode(true);
+  fillFiles(fresh, res);
+  for (const sel of [".block-figures", ".files-list"]) $(sel, node).replaceWith($(sel, fresh));
+  const otm = (res.files || []).find((p) => p.toLowerCase().endsWith(".otm"));
+  const otmBtn = $(".save-otm", node);
+  if (otm && otmBtn.hidden) { otmBtn.hidden = false; otmBtn.addEventListener("click", () => saveOutput(otm)); }
+  $(".sample-meta", node).textContent = sampleMeta(res);
+  loadThumbnails($(".gallery", node));
+  const host = $(".tv-host", node);
+  if (host && !currentView && res.view) showTissueView($(".block-view", node), res);   // it was waiting for the pack
 }
 
 function setOverviewRow(name, res) {
@@ -989,6 +1124,8 @@ function setOverviewRow(name, res) {
     el("td", {}, status),
     el("td", { class: "num", text: s.n_capillaries !== undefined ? fmtInt(s.n_capillaries) : "" }),
     el("td", { class: "num", text: s.LCFR_mean !== undefined ? fmt(s.LCFR_mean, 3) : "" }),
+    el("td", { class: "num" + (s.uptake_switched_by_lambda === "yes" ? " warn-text" : ""), title: s.demand_regime || "",
+      text: s.lambda_ratio !== undefined && s.lambda_ratio !== null ? fmt(s.lambda_ratio, 2) : "" }),
     el("td", { class: "num", text: s.po2_tissue_mean_mmHg !== undefined ? fmt(s.po2_tissue_mean_mmHg, 2) : "" }),
     el("td", { class: "num" + (hyp > 0 ? " warn-text" : ""), text: hyp !== undefined ? fmt(hyp, 1) : "" }),
     el("td", { class: "num", text: res.seconds ? fmt(res.seconds, 0) : "" }),
@@ -1009,6 +1146,33 @@ function tableText(table) {
   return $$("tr", table).map((tr) => $$("th,td", tr).map((c) => c.textContent).join("\t")).join("\n");
 }
 
+function sampleMeta(res) {
+  const meta = [];
+  if (res.size_um) meta.push(`${fmt(res.size_um[0], 0)} × ${fmt(res.size_um[1], 0)} µm`);
+  if (res.roi_um) meta.push(`ROI x ${fmt(res.roi_um[0], 0)}–${fmt(res.roi_um[1], 0)}, y ${fmt(res.roi_um[2], 0)}–${fmt(res.roi_um[3], 0)} µm`);
+  if (res.mesh) meta.push(`mesh ${fmtInt(res.mesh.nodes)} nodes (${res.mesh.mesher})`);
+  if (res.solve) meta.push(`${res.solve.converged ? "converged" : "NOT converged"} in ${res.solve.iterations} Newton iteration(s), PO₂ ${fmt(res.solve.po2_min_mmHg)}–${fmt(res.solve.po2_max_mmHg)} mmHg`);
+  if (res.flux) meta.push(`flux lines from ${res.flux.capillaries_with_lines} of ${res.flux.seed_capillaries} ROI capillaries`);
+  if (res.switches && res.po2) meta.push(`exercise ${LEVEL_NAMES[res.switches.exercise] || res.switches.exercise}: O₂ demand × ${fmtNum(res.switches.demand)}`);
+  if (res.flux && res.flux.cap_um) meta.push(`flux-line cap ${fmt(res.flux.cap_um, 1)} µm`);
+  if (res.corrections) meta.push(`${res.corrections} correction(s) applied${res.corrections_from === "page" ? " (made here)" : " (from the .otm)"}`);
+  if (res.figures_pending && res.seconds_tables === res.seconds) meta.push("figures being written…");
+  else if (res.seconds) meta.push(`${fmt(res.seconds, 0)} s`);
+  return meta.join(" · ");
+}
+
+function fillFiles(node, res) {
+  const files = res.files || [];
+  const pngs = files.filter((p) => p.toLowerCase().endsWith(".png"));
+  const gallery = $(".gallery", node);
+  if (!pngs.length) $(".block-figures", node).replaceChildren(el("h4", { text: "Figures" }),
+    el("p", { class: "empty", text: res.figures_pending && res.seconds_tables === res.seconds ? "Writing the figures…" : "No figures in this run." }));
+  for (const p of pngs) gallery.append(figureCard(p, files));
+  const ul = $(".files-list ul", node);
+  for (const p of files) ul.append(el("li", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); saveOutput(p); }, text: p.split("/").slice(1).join("/") })));
+  $(".files-list", node).hidden = !files.length;
+}
+
 function selectSample(name) {
   state.selected = name;
   for (const tr of $$("#overview tbody tr")) tr.classList.toggle("selected", tr.dataset.name === name);
@@ -1021,20 +1185,18 @@ function selectSample(name) {
   const badge = $(".badge", node);
   badge.textContent = res.ok ? "ok" : "error";
   badge.classList.add(res.ok ? "ok" : "error");
-  const meta = [];
-  if (res.size_um) meta.push(`${fmt(res.size_um[0], 0)} × ${fmt(res.size_um[1], 0)} µm`);
-  if (res.roi_um) meta.push(`ROI x ${fmt(res.roi_um[0], 0)}–${fmt(res.roi_um[1], 0)}, y ${fmt(res.roi_um[2], 0)}–${fmt(res.roi_um[3], 0)} µm`);
-  if (res.mesh) meta.push(`mesh ${fmtInt(res.mesh.nodes)} nodes (${res.mesh.mesher})`);
-  if (res.solve) meta.push(`${res.solve.converged ? "converged" : "NOT converged"} in ${res.solve.iterations} Newton iteration(s), PO₂ ${fmt(res.solve.po2_min_mmHg)}–${fmt(res.solve.po2_max_mmHg)} mmHg`);
-  if (res.flux) meta.push(`flux lines from ${res.flux.capillaries_with_lines} of ${res.flux.seed_capillaries} ROI capillaries`);
-  if (res.switches && res.po2) meta.push(`exercise ${LEVEL_NAMES[res.switches.exercise] || res.switches.exercise}: O₂ demand × ${fmtNum(res.switches.demand)}`);
-  if (res.corrections) meta.push(`${res.corrections} correction(s) applied${res.corrections_from === "page" ? " (made here)" : " (from the .otm)"}`);
-  if (res.seconds) meta.push(`${fmt(res.seconds, 0)} s`);
-  $(".sample-meta", node).textContent = meta.join(" · ");
+  $(".sample-meta", node).textContent = sampleMeta(res);
   const errs = $(".errors", node);
   for (const e of res.errors || []) errs.append(el("p", { text: e.message }));
   for (const w of res.corrections_skipped || []) errs.append(el("p", { text: `Correction skipped: ${w}` }));
   showCheckResult($(".dc-result", node), res.check);
+  if (res.demand) {
+    const dm = $(".demand-result", node);
+    dm.hidden = false;
+    dm.classList.toggle("switch", !!res.demand.uptake_switched_by_lambda);
+    dm.textContent = res.demand.text;
+    if (res.demand.warning) dm.append(document.createElement("br"), el("b", { text: "⚠ " }), res.demand.warning);
+  }
   const otm = (res.files || []).find((p) => p.toLowerCase().endsWith(".otm"));
   const otmBtn = $(".save-otm", node);
   if (otm) { otmBtn.hidden = false; otmBtn.addEventListener("click", () => saveOutput(otm)); }
@@ -1056,16 +1218,9 @@ function selectSample(name) {
       catch { toast("Copy is blocked by the browser here; select the table and press Ctrl+C.", true); }
     });
   }
-  const files = res.files || [];
-  const pngs = files.filter((p) => p.toLowerCase().endsWith(".png"));
-  const gallery = $(".gallery", node);
-  if (!pngs.length) $(".block-figures", node).replaceChildren(el("h4", { text: "Figures" }), el("p", { class: "empty", text: "No figures in this run." }));
-  for (const p of pngs) gallery.append(figureCard(p, files));
-  const ul = $(".files-list ul", node);
-  for (const p of files) ul.append(el("li", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); saveOutput(p); }, text: p.split("/").slice(1).join("/") })));
-  if (!files.length) $(".files-list", node).hidden = true;
+  fillFiles(node, res);
   view.append(node);
-  loadThumbnails(gallery);
+  loadThumbnails($(".gallery", node));
   showTissueView($(".block-view", node), res);
 }
 
@@ -1084,7 +1239,10 @@ function showCheckResult(box, q) {
 // ---- tissue view ------------------------------------------------------------------------------
 async function viewData(name) {
   if (state.views.has(name)) return state.views.get(name);
-  const bytes = await engine.call("view", { name });
+  const pk = state.packs.get(name);
+  const res = state.results.get(name);
+  if (!pk && res && res.owner === "extra") return "pending";        // still in its own worker
+  const bytes = pk ? (pk.get("view.bin") || null) : await engine.call("view", { name });
   if (!bytes) return null;
   const v = parseView(bytes.buffer.byteLength === bytes.byteLength ? bytes.buffer : bytes.slice().buffer);
   state.views.set(name, v);
@@ -1106,6 +1264,7 @@ async function showTissueView(block, res) {
   try { data = await viewData(res.name); }
   catch (e) { host.replaceChildren(el("p", { class: "empty", text: `The tissue view could not be loaded: ${e.message}` })); return; }
   if (!host.isConnected || state.selected !== res.name) return;   // another sample was selected meanwhile
+  if (data === "pending") { host.replaceChildren(el("p", { class: "empty", text: "The tissue view appears when this sample's figures are written." })); return; }
   if (!data) { host.replaceChildren(el("p", { class: "empty", text: "No tissue view for this run." })); return; }
   host.textContent = "";
   const settings = state.lastSettings || {};
@@ -1137,15 +1296,23 @@ function figureCard(path, all) {
     el("figcaption", {}, el("span", { title: baseName(path), text: label }), el("span", {}, ...sep)));
 }
 
+// an output file: from the main worker, or from the pack of a sample run in an extra worker
+async function outputBytes(path) {
+  const pk = state.packs.get(path.split("/")[0]);
+  if (pk && pk.has("out/" + path)) return pk.get("out/" + path);
+  return engine.call("file", { path });
+}
+
 async function figureURL(path) {
   if (state.figureCache.has(path)) return state.figureCache.get(path);
-  const bytes = await engine.call("file", { path });
+  const bytes = await outputBytes(path);
   const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
   state.figureCache.set(path, url);
   return url;
 }
 
 async function loadThumbnails(gallery) {
+  if (!gallery) return;
   for (const fig of $$(".fig", gallery)) {
     if (!fig.isConnected) return;               // another sample was selected meanwhile
     try { $("img", fig).src = await figureURL(fig.dataset.path); }
@@ -1168,7 +1335,7 @@ const MIME = { png: "image/png", pdf: "application/pdf", svg: "image/svg+xml", t
 
 async function saveOutput(path) {
   try {
-    const bytes = await engine.call("file", { path });
+    const bytes = await outputBytes(path);
     const ext = path.split(".").pop().toLowerCase();
     download(new Blob([bytes], { type: MIME[ext] || "application/octet-stream" }), baseName(path));
   } catch (e) { toast(`Could not save ${baseName(path)}: ${e.message}`, true); }
@@ -1435,4 +1602,5 @@ if (typeof Worker === "undefined" || typeof WebAssembly === "undefined") {
 } else start();
 
 // for the browser test
-window.__otm = { state, engine, storeResult, selectSample, download: pyDownload, ed, openEditor, get view() { return currentView; } };
+window.__otm = { state, engine, storeResult, selectSample, download: pyDownload, ed, openEditor, addFiles, renderFiles, validate,
+  get view() { return currentView; } };

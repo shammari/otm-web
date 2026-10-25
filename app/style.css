@@ -367,3 +367,13 @@ dialog.editor-dialog::backdrop, dialog.help-dialog::backdrop { background: rgb(5
   .ed-side { max-height: 40vh; border-right: none; border-bottom: 1px solid var(--line); }
   .tv-tools { margin-left: 0; }
 }
+
+/* ---- oxygen demand Λ ------------------------------------------------------------- */
+.demand-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); display: grid; gap: 2px; }
+.demand-box > .hint { margin: 0; }
+.dm-options { padding-left: 24px; }
+.dm-options .check { margin-top: 6px; }
+#dm-estimate b { color: var(--text); }
+#dm-estimate.switch { color: var(--warning); }
+.demand-result { margin: 0 0 12px; font-size: 13.5px; color: var(--muted); }
+.demand-result.switch { color: var(--warning); }

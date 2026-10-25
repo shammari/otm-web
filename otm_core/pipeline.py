@@ -39,7 +39,7 @@ from .models import ROI, Geometry, LengthScale, RetouchSettings
 from .progress import ProgressCallback, report, scaled
 
 __all__ = ["RunSettings", "RunResult", "STEPS", "run_file", "run_batch", "find_data_files", "read_dimensions_table",
-           "summary_row", "write_summary", "SUMMARY_FILE", "SETTINGS_FILE"]
+           "summary_row", "write_summary", "SUMMARY_FILE", "SETTINGS_FILE", "export_run"]
 
 STEPS = ("indices", "po2", "flux")
 """Analysis steps a run can include; "flux" needs "po2"."""
@@ -57,6 +57,12 @@ def _mesh_settings_default():
     from .fem import default_mesh_settings
 
     return default_mesh_settings()
+
+
+def _demand_default():
+    from .demand import DemandSettings
+
+    return DemandSettings()
 
 
 def _flux_settings_default():
@@ -96,6 +102,7 @@ class RunSettings:
     po2_range_mmHg: Optional[Tuple[float, float]] = None
     data_check: str = "fix"                        # segmentation errors: "fix" (remove the flagged items),
                                                    # "skip" (do not analyse the file), "keep" (where allowed)
+    demand: Any = field(default_factory=lambda: _demand_default())   # otm_core.demand.DemandSettings (Λ)
 
     def __post_init__(self):
         if self.tissue not in ("skeletal", "cardiac"):
@@ -171,6 +178,7 @@ class RunSettings:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "RunSettings":
+        from .demand import DemandSettings
         from .fem import MeshSettings
         from .flux import FluxSettings
 
@@ -179,7 +187,10 @@ class RunSettings:
         if unknown:
             raise ValueError(f"unknown settings: {sorted(unknown)}")
         kw = dict(d)
-        for name, typ in (("retouch", RetouchSettings), ("mesh", MeshSettings), ("flux", FluxSettings)):
+        if isinstance(kw.get("demand"), Mapping):         # withdrawn on 25 Oct 2026 (the cap stays the resting one)
+            kw["demand"] = {k: v for k, v in kw["demand"].items() if k != "scale_flux_cap"}
+        for name, typ in (("retouch", RetouchSettings), ("mesh", MeshSettings), ("flux", FluxSettings),
+                          ("demand", DemandSettings)):
             if isinstance(kw.get(name), Mapping):
                 kw[name] = _dataclass_from(typ, kw[name])
         for name in ("roi_um", "roi_fraction", "po2_range_mmHg", "steps", "figure_formats"):
@@ -234,6 +245,7 @@ class RunResult:
     errors: Dict[str, str] = field(default_factory=dict)
     details: Dict[str, str] = field(default_factory=dict)      # step -> traceback
     data_check: Optional[Dict[str, Any]] = None                 # otm_core.qc result (with what was done)
+    demand: Any = None                                          # otm_core.demand.DemandResult (Λ)
 
     @property
     def ok(self) -> bool:
@@ -281,6 +293,48 @@ def _output_folders(path: str, out_dir: Optional[str], stem: str) -> Tuple[str, 
     """``INDICES``/``PO2`` next to the data file, or ``<out>/<stem>/INDICES`` ..."""
     root = os.path.join(out_dir, stem) if out_dir else os.path.dirname(os.path.abspath(path))
     return os.path.join(root, "INDICES"), os.path.join(root, "PO2")
+
+
+def export_run(res: "RunResult", out_dir: Optional[str] = None, progress: Optional[ProgressCallback] = None,
+               figures: Optional[bool] = None) -> List[str]:
+    """Write the tables (and figures) of a run, as :func:`run_file` does, into
+    ``<out_dir>/<stem>/INDICES`` and ``.../PO2`` (next to the data file without
+    ``out_dir``). ``figures``: None = the run's settings; True/False overrides
+    them (the browser writes the tables first and the figures afterwards, so the
+    numbers are shown sooner). Writing again overwrites the same tables."""
+    from . import export as ex
+
+    s = res.settings
+    g = res.geometry
+    figs = s.figures if figures is None else bool(figures)
+    stem = os.path.splitext(os.path.basename(res.path))[0]
+    ind_dir, po2_dir = _output_folders(res.path, out_dir, stem)
+    files: List[str] = []
+    fs = s.figure_style()
+    p = progress
+    if res.morphometrics is not None:
+        files += ex.export_indices(res.morphometrics, g, ind_dir, res.base_name, figs, s.dpi,
+                                   progress=scaled(p, 0.0, 0.45), style=fs)
+    if res.solution is not None:
+        files += ex.export_po2(res.solution, g, po2_dir, res.base_name, s.tissue,
+                               getattr(res.model, "fiber_index", None), figs, s.colormap,
+                               s.po2_range_mmHg, s.dpi, progress=scaled(p, 0.45, 0.9), style=fs)
+    dc = res.data_check
+    if dc and (dc.get("issues") or dc.get("fixed_issues")):
+        from . import qc
+
+        folder = ind_dir if res.morphometrics is not None or res.solution is None else po2_dir
+        files += qc.write_report(dc, os.path.join(folder, res.base_name + "_data_check"), res.raw)
+    if res.flux_lines is not None:
+        vor = res.morphometrics.domains.voronoi if res.morphometrics is not None else None
+        files += ex.export_flux(res.flux_lines, g, res.mesh, po2_dir, res.base_name, vor,
+                                getattr(res.model, "capillary_index", None), figs, s.dpi,
+                                progress=scaled(p, 0.9, 1.0), style=fs)
+    if res.demand is not None and res.solution is not None:
+        from .demand import write_report
+
+        files += write_report(res.demand, os.path.join(po2_dir, res.base_name))
+    return files
 
 
 def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optional[str] = None,
@@ -421,6 +475,14 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
 
     # ---- mesh, PO2, flux
     if "po2" in s.steps:
+        try:                                       # Λ: the section's O2 demand (otm_core.demand)
+            from .demand import assess
+
+            res.demand = assess(g, s.transport_parameters(), s.switches(), s.tissue, s.demand)
+        except Exception as exc:                   # noqa: BLE001 - Λ must never stop a run
+            res.details["demand_error"] = f"{type(exc).__name__}: {exc}"
+        switches = res.demand.switches if res.demand is not None else s.switches()
+
         def mesh(p):
             from .fem import mesh_tissue
 
@@ -434,7 +496,7 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
             def po2(p):
                 from .fem import solve_po2
 
-                sol = solve_po2(res.mesh, params, s.switches(), tissue=s.tissue, progress=p)
+                sol = solve_po2(res.mesh, params, switches, tissue=s.tissue, progress=p)
                 if not sol.converged:
                     raise RuntimeError(f"Newton did not converge in {sol.iterations} iterations")
                 return sol
@@ -461,30 +523,7 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
     # ---- exports
     if s.export:
         def export(p):
-            from . import export as ex
-
-            ind_dir, po2_dir = _output_folders(path, out_dir, stem)
-            files: List[str] = []
-            fs = s.figure_style()
-            if res.morphometrics is not None:
-                files += ex.export_indices(res.morphometrics, g, ind_dir, res.base_name, s.figures, s.dpi,
-                                           progress=scaled(p, 0.0, 0.45), style=fs)
-            if res.solution is not None:
-                files += ex.export_po2(res.solution, g, po2_dir, res.base_name, s.tissue,
-                                       getattr(res.model, "fiber_index", None), s.figures, s.colormap,
-                                       s.po2_range_mmHg, s.dpi, progress=scaled(p, 0.45, 0.9), style=fs)
-            dc = res.data_check
-            if dc and (dc.get("issues") or dc.get("fixed_issues")):
-                from . import qc
-
-                folder = ind_dir if res.morphometrics is not None or res.solution is None else po2_dir
-                files += qc.write_report(dc, os.path.join(folder, res.base_name + "_data_check"), res.raw)
-            if res.flux_lines is not None:
-                vor = res.morphometrics.domains.voronoi if res.morphometrics is not None else None
-                files += ex.export_flux(res.flux_lines, g, res.mesh, po2_dir, res.base_name, vor,
-                                        getattr(res.model, "capillary_index", None), s.figures, s.dpi,
-                                        progress=scaled(p, 0.9, 1.0), style=fs)
-            return files
+            return export_run(res, out_dir, progress=p)
 
         res.files = step("export", export) or []
     if save_session:
@@ -545,6 +584,14 @@ def summary_row(res: RunResult) -> Dict[str, Any]:
                                    "kept" if dc.get("overridden") else dc["status"]),
                     "data_check_problems": "; ".join(f"{i['code']} x{max(1, len(i['items']))}" for i in found),
                     "data_check_actions": " | ".join(a["text"] for a in dc.get("actions", []))})
+    dm = res.demand
+    if dm is not None:
+        sm = dm.summary()
+        row.update({"lambda_tissue": sm["lambda_tissue"], "lambda_rest": sm["lambda_rest"],
+                    "lambda_ratio": sm["lambda_ratio"], "demand_regime": sm["demand_regime"],
+                    "uptake_switched_by_lambda": "yes" if sm["uptake_switched_by_lambda"] else "no",
+                    "demand_warning": dm.warning,
+                    "lambda_domain_area_um2": sm.get("domain_area_um2", nan)})
     ls = g.length_scale if g is not None else None
     row.update({"width_um": ls.x_um if ls else nan, "height_um": ls.y_um if ls else nan,
                 "roi_x_min_um": g.roi.x_min_um if g is not None else nan,

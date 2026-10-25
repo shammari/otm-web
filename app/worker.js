@@ -196,6 +196,26 @@ const commands = {
     // edits: the page editor's corrections (a list) or null to use the .otm added with the file
     return JSON.parse(web.run(name, JSON.stringify(settings), progress, edits === undefined || edits === null ? "null" : JSON.stringify(edits)));
   },
+  figures({ name }) {
+    let last = 0;
+    const progress = (f, msg) => {
+      const now = performance.now();
+      if (now - last > 120 || f >= 1) { last = now; postMessage({ type: "progress", name, f, msg, stage: "figures" }); }
+    };
+    return JSON.parse(web.figures(name, progress));
+  },
+  pack({ name }) {
+    const path = web.pack(name);
+    const bytes = py.FS.readFile(path);
+    py.FS.unlink(path);
+    return transfer(bytes);
+  },
+  unpack({ name, buffer }) {
+    const path = `/tmp/unpack_${name}.zip`;
+    py.FS.writeFile(path, new Uint8Array(buffer));
+    web.unpack(name, path);
+    return true;
+  },
   zip({ names, settings }) {
     const path = web.make_zip(JSON.stringify(names), JSON.stringify(settings));
     const bytes = py.FS.readFile(path);
