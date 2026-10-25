@@ -69,8 +69,10 @@ def driver_for(a):
         o.add_argument("--automation")
         return webdriver.WebKitGTK(options=o, service=Service(executable_path=a.webkitdriver or "WebKitWebDriver"))
     if a.browser == "edge":
+        from selenium.webdriver.edge.service import Service
+
         o = webdriver.EdgeOptions()
-        return webdriver.Edge(options=o)
+        return webdriver.Edge(options=o, service=Service(a.edgedriver) if a.edgedriver else None)
     o = webdriver.ChromeOptions()
     if not a.headed:
         o.add_argument("--headless=new")
@@ -82,6 +84,7 @@ def main() -> int:
     ap.add_argument("--browser", choices=("firefox", "webkit", "chrome", "edge"), required=True)
     ap.add_argument("--firefox"), ap.add_argument("--geckodriver")
     ap.add_argument("--webkit"), ap.add_argument("--webkitdriver")
+    ap.add_argument("--edgedriver", help="msedgedriver.exe (else Selenium Manager downloads one)")
     ap.add_argument("--url", help="test a published site instead of serving this folder")
     ap.add_argument("--port", type=int, default=8768)
     ap.add_argument("--headed", action="store_true")
