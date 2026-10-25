@@ -18,8 +18,11 @@
       <p class="tagline">Oxygen transport in muscle tissue · runs in your browser, your files stay on your computer</p>
     </div>
   </div>
-  <div id="engine" class="engine" role="status" aria-live="polite">
-    <span class="dot"></span><span id="engine-text">Starting…</span>
+  <div class="top-right">
+    <div id="engine" class="engine" role="status" aria-live="polite">
+      <span class="dot"></span><span id="engine-text">Starting…</span>
+    </div>
+    <button id="help-button" class="ghost small" type="button" aria-haspopup="dialog">Help</button>
   </div>
 </header>
 
@@ -34,7 +37,7 @@
 <!-- ============================== 1 FILES ============================== -->
 <section id="files" class="card">
   <h2><b>1</b> Files</h2>
-  <p class="hint">Add Dtect exports (<code>.mat</code>). To apply corrections made in the desktop app, add its session (<code>.otm</code>) with the same name too. For each file type the width <i>or</i> the height of the image in µm; the other side is calculated from the image shape. With several files of the same size, type it once and click <b>Same for all</b>.</p>
+  <p class="hint">Add Dtect exports (<code>.mat</code>). Each file is checked for segmentation problems as it arrives; click <b>Correct…</b> to see the flagged items and fix the data (capillaries, fibres, fibre types), as in the desktop app. Corrections made in the desktop app come in with its session (<code>.otm</code>) of the same name. For each file type the width <i>or</i> the height of the image in µm; the other side is calculated from the image shape. With several files of the same size, type it once and click <b>Same for all</b>. No file at hand? <button class="link" id="try-sample" type="button">Try the sample section</button>.</p>
   <label id="drop" class="drop" tabindex="0">
     <input id="file-input" type="file" accept=".mat,.otm" multiple hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -45,7 +48,7 @@
       <thead><tr>
         <th>File</th><th class="num">Image (px)</th><th class="num">Capillaries</th><th class="num">Fibres</th>
         <th>Fibre types</th><th class="num">Width (µm)</th>
-        <th class="num">Height (µm)</th><th></th><th>Check</th><th></th>
+        <th class="num">Height (µm)</th><th></th><th>Data check</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -86,12 +89,17 @@
       <div class="seg" role="radiogroup">
         <label><input type="radio" name="roi" value="default" checked><span>Central 60 %</span></label>
         <label><input type="radio" name="roi" value="edges"><span>Edges in µm</span></label>
+        <label><input type="radio" name="roi" value="shares"><span>Shares (%)</span></label>
       </div>
       <div class="roi-grid" id="roi-edges" hidden>
         <label>x from <input type="number" id="roi-x0" step="any"></label><label>to <input type="number" id="roi-x1" step="any"></label>
         <label>y from <input type="number" id="roi-y0" step="any"></label><label>to <input type="number" id="roi-y1" step="any"></label>
       </div>
-      <p class="hint small">Where supply indices and flux lines are evaluated.</p>
+      <div class="roi-grid" id="roi-shares" hidden>
+        <label>x from <input type="number" id="roi-fx0" step="any" min="0" max="100" value="20"> %</label><label>to <input type="number" id="roi-fx1" step="any" min="0" max="100" value="80"> %</label>
+        <label>y from <input type="number" id="roi-fy0" step="any" min="0" max="100" value="20"> %</label><label>to <input type="number" id="roi-fy1" step="any" min="0" max="100" value="80"> %</label>
+      </div>
+      <p class="hint small">Where supply indices and flux lines are evaluated (origin bottom-left). Shares give the same part of every section, whatever its size.</p>
     </fieldset>
 
     <fieldset>
@@ -102,6 +110,17 @@
         <option value="indices,po2,flux" selected>Supply indices, PO₂ and flux lines</option>
       </select>
       <p class="hint small">PO₂ and flux lines take about 1 to 2 minutes per sample.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Data check</legend>
+      <span class="label small">When a file has segmentation errors:</span>
+      <div class="stack" role="radiogroup">
+        <label class="check"><input type="radio" name="dcheck" value="fix" checked> Remove the flagged items, then analyse</label>
+        <label class="check"><input type="radio" name="dcheck" value="skip"> Skip the file</label>
+        <label class="check"><input type="radio" name="dcheck" value="keep"> Keep the flagged items where allowed</label>
+      </div>
+      <p class="hint small">As the desktop batch runner. Every run writes a data-check report next to the results when problems were found.</p>
     </fieldset>
 
     <fieldset class="wide">
@@ -146,6 +165,42 @@
         <p class="hint small">A fixed range puts all samples on one colour scale so they can be compared.</p>
       </div>
     </fieldset>
+
+    <details class="wide advanced" id="advanced">
+      <summary>Advanced settings <span class="hint small">retouch, mesh, flux lines, session files</span></summary>
+      <div class="grid">
+        <fieldset>
+          <legend>Retouch fibre outlines</legend>
+          <label class="check"><input type="checkbox" id="rt-smooth"> Smooth outlines (moving average)</label>
+          <label class="field-row">Window <input type="number" id="rt-smooth-tol" min="1" max="51" step="2" class="short"> px</label>
+          <label class="check"><input type="checkbox" id="rt-reduce"> Reduce vertices (Douglas–Peucker)</label>
+          <label class="field-row">Tolerance <input type="number" id="rt-reduce-tol" min="0.05" max="20" step="any" class="short"> px</label>
+          <label class="check"><input type="checkbox" id="rt-disjoint"> Remove fibre–fibre overlaps</label>
+          <label class="check"><input type="checkbox" id="rt-tangent"> Separate touching fibres</label>
+          <label class="field-row">Gap <input type="number" id="rt-tangent-tol" min="0.1" max="20" step="any" class="short"> px</label>
+        </fieldset>
+        <fieldset>
+          <legend>Mesh</legend>
+          <label class="field-row">Largest element <input type="number" id="mesh-hmax" min="0.002" max="0.2" step="any" class="short"> model units</label>
+          <label class="field-row">Segments per capillary wall <input type="number" id="mesh-wall" min="8" max="96" step="1" class="short"></label>
+          <label class="field-row">Overlapping fibres <select id="mesh-overlap"><option value="matlab">matlab</option><option value="index">index</option><option value="larger">larger</option><option value="split">split</option></select></label>
+          <p class="hint small">1 model unit = half the tissue height. Finer meshes take longer. The browser meshes with Triangle (the desktop with gmsh).</p>
+        </fieldset>
+        <fieldset>
+          <legend>Flux lines</legend>
+          <label class="field-row">Lines per capillary <input type="number" id="flux-lines" min="1" max="256" step="1" class="short"></label>
+          <label class="field-row">Length cap <select id="flux-cap"><option value="auto">Automatic (1.25 × mean capillary spacing)</option><option value="fixed">Fixed length</option><option value="none">None (to the minimum)</option></select></label>
+          <label class="field-row" id="flux-cap-um-row" hidden>Cap <input type="number" id="flux-cap-um" min="1" max="2000" step="any" value="30" class="short"> µm</label>
+          <label class="field-row">Integrator <select id="flux-integrator"><option value="heun">Heun (fixed step)</option><option value="ivp">solve_ivp (adaptive, events)</option></select></label>
+          <label class="check"><input type="checkbox" id="flux-legacy"> Legacy MATLAB settings (time parametrization, seeds at 0.015)</label>
+        </fieldset>
+        <fieldset>
+          <legend>Session files</legend>
+          <label class="check"><input type="checkbox" id="save-session" checked> Save a session (<code>.otm</code>) per sample</label>
+          <p class="hint small">Opens the sample in the desktop app with its mesh, PO₂ and flux lines, without recomputing. About 9 MB each, included in the ZIP.</p>
+        </fieldset>
+      </div>
+    </details>
   </div>
   <p id="settings-error" class="error" hidden></p>
 </section>
@@ -194,6 +249,11 @@
     </div>
     <p class="sample-meta"></p>
     <div class="errors"></div>
+    <div class="dc-result" hidden></div>
+    <div class="block block-view">
+      <div class="block-head"><h4>Tissue view</h4><div class="row-actions"><button class="ghost small save-otm" type="button" hidden>Save session (.otm)</button></div></div>
+      <div class="tv-host"></div>
+    </div>
     <div class="cols">
       <div class="block block-indices">
         <div class="block-head"><h4>Supply indices</h4><button class="ghost small copy" type="button">Copy table</button></div>
@@ -217,5 +277,68 @@
     </details>
   </article>
 </template>
+
+<!-- data check and corrections of one file (the desktop's "Correct data" step) -->
+<dialog id="editor-dialog" class="editor-dialog" aria-labelledby="ed-title">
+  <div class="ed-head">
+    <h3 id="ed-title">Correct data</h3>
+    <div class="row-actions">
+      <button class="ghost small" id="ed-save-otm" type="button" title="Data, data check and corrections, to continue in the desktop app">Save session (.otm)</button>
+      <button class="primary small" id="ed-done" type="button">Done</button>
+    </div>
+  </div>
+  <div class="ed-body">
+    <aside class="ed-side">
+      <div id="ed-check" class="ed-check"></div>
+      <h4>Tools</h4>
+      <div class="ed-tools" id="ed-tools"></div>
+      <p class="hint small" id="ed-tool-hint"></p>
+      <label class="field-row">Fibre type for new / clicked fibres <select id="ed-type"><option value="1">Type I</option><option value="21">Type IIa</option><option value="22">Type IIb</option><option value="0">Unknown</option></select></label>
+      <div class="row-actions gap-top">
+        <button class="ghost small" id="ed-undo" type="button">Undo</button>
+        <button class="ghost small" id="ed-redo" type="button">Redo</button>
+        <button class="ghost small" id="ed-reset" type="button">Remove all corrections</button>
+      </div>
+      <h4 class="gap-top">Corrections</h4>
+      <ol class="ed-list" id="ed-list"></ol>
+      <p class="hint small" id="ed-info"></p>
+      <p class="warn-text small" id="ed-warn" hidden></p>
+      <p class="hint small ed-hover" id="ed-hover"></p>
+    </aside>
+    <div class="ed-stage" id="ed-stage" aria-label="Tissue editor"></div>
+  </div>
+</dialog>
+
+<!-- help and about -->
+<dialog id="help-dialog" class="help-dialog" aria-labelledby="help-title">
+  <div class="ed-head">
+    <h3 id="help-title">OTM Web</h3>
+    <button class="ghost small" type="button" data-close>Close</button>
+  </div>
+  <div class="help-body">
+    <section>
+      <h4>Quick start</h4>
+      <ol>
+        <li><b>Files:</b> drop Dtect exports (<code>.mat</code>) and type each image's width or height in µm. Each file is checked for segmentation problems; <b>Correct…</b> opens the data with the flagged items marked.</li>
+        <li><b>Settings:</b> tissue, region of interest, biophysical parameters and exercise level, analysis steps and figures. They save as the JSON the desktop batch runner reads.</li>
+        <li><b>Run</b>, then look at each sample: tables, the interactive tissue view (PO₂ map, flux lines, capillary domains) and the figures. <b>Download all results (ZIP)</b> before closing the tab.</li>
+      </ol>
+      <div class="row-actions">
+        <button class="ghost small" id="help-sample" type="button">Load the sample section</button>
+        <button class="ghost small" id="help-report" type="button">Save diagnostic report</button>
+      </div>
+      <p class="hint small">The sample is the 2022 regression section (440 × 330 µm, 127 capillaries, 89 fibres). The diagnostic report is a text file with the program versions, your browser, the settings and any errors of this visit; nothing is sent anywhere.</p>
+    </section>
+    <section>
+      <h4>About</h4>
+      <p><b>Oxygen Transport Modeller (OTM) Web</b> <span class="hint" id="about-version"></span><br>
+      Capillary supply indices, PO₂ finite-element model and oxygen flux lines for muscle sections, running in the browser.</p>
+      <p>Author: <b>Abdullah A. Al-Shammari</b>, Kuwait University.<br>
+      In collaboration with Roger Kissane (University of Liverpool), Stuart Egginton (University of Leeds) and Eamonn A. Gaffney (University of Oxford).</p>
+      <p>Questions and problem reports: <a href="mailto:abdullah.alshammari@ku.edu.kw?subject=OTM2026">abdullah.alshammari@ku.edu.kw</a>, subject <b>OTM2026</b>. Please attach the diagnostic report.</p>
+      <p class="hint small">Your files never leave your computer. The mesher, Triangle, is free for non-commercial use only. <a href="https://github.com/shammari/otm-web">Source and licences</a>.</p>
+    </section>
+  </div>
+</dialog>
 </body>
 </html>

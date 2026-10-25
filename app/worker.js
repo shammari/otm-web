@@ -168,20 +168,33 @@ const commands = {
     py.FS.writeFile(`/data/${name}${ext}`, new Uint8Array(buffer));
     return true;
   },
-  inspect: ({ name }) => JSON.parse(web.inspect(name)),
+  inspect: ({ name, opts }) => JSON.parse(web.inspect(name, JSON.stringify(opts || {}))),
+  prepare: ({ name, opts, edits }) => JSON.parse(web.prepare(name, JSON.stringify(opts || {}), JSON.stringify(edits || []))),
+  sessionFromEdits({ name, opts, edits }) {
+    const path = web.session_from_edits(name, JSON.stringify(opts || {}), JSON.stringify(edits || []));
+    const bytes = py.FS.readFile(path);
+    py.FS.unlink(path);
+    return transfer(bytes);
+  },
+  view({ name }) {
+    const path = web.view_path(name);
+    if (!py.FS.analyzePath(path).exists) return null;
+    return transfer(py.FS.readFile(path));
+  },
   corrections: ({ name }) => JSON.parse(web.corrections(name)),
   drop: ({ name }) => { web.drop(name); return true; },
   forget: ({ name }) => { web.forget(name); return true; },
   check: ({ settings }) => JSON.parse(web.check_settings(JSON.stringify(settings))),
   parseDat: ({ text }) => JSON.parse(web.parse_parameters(text)),
   parseDims: ({ text }) => JSON.parse(web.parse_dimensions(text)),
-  run({ name, settings }) {
+  run({ name, settings, edits }) {
     let last = 0;
     const progress = (f, msg) => {
       const now = performance.now();
       if (now - last > 120 || f >= 1) { last = now; postMessage({ type: "progress", name, f, msg }); }
     };
-    return JSON.parse(web.run(name, JSON.stringify(settings), progress));
+    // edits: the page editor's corrections (a list) or null to use the .otm added with the file
+    return JSON.parse(web.run(name, JSON.stringify(settings), progress, edits === undefined || edits === null ? "null" : JSON.stringify(edits)));
   },
   zip({ names, settings }) {
     const path = web.make_zip(JSON.stringify(names), JSON.stringify(settings));
