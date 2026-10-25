@@ -6,7 +6,9 @@ For fibre ``j`` (definition by A. A. Al-Shammari, 25 Oct 2026)::
 
 * ``M0_j``  maximal O2 consumption of the fibre (ml O2 / ml / s): the exercise
   level times M0, shared between the fibre types exactly as the PO2 solver
-  shares it (uptake ratios of Popel et al. 2012, normalised so that the
+  shares it (uptake ratios of Popel et al. 2012, I 2.08 m and IIa 1.76 m times IIb
+  with m the differential O2 extraction (1, 5 or 10; legacy
+  GetCompartmentIndicesAndModelParameters.m), normalised so that the
   mean over the whole section (interstitial space included) is exercise level × M0);
 * ``A_j``   fibre area (cm²), from the retouched outline the model uses;
 * ``α_j D_j`` O2 solubility × diffusivity of the fibre type, as the solver's
@@ -26,7 +28,7 @@ penetration depth is δ = √(2 K Pcap / M)).
 Per fibre, Λ spreads over about a factor ten with fibre size alone, so the
 regime is decided on the section: ``Λ_tissue`` (area-weighted mean over the
 fibres) compared with ``Λ_rest``, the same section with the tissue's resting
-default parameters and exercise level 1. Their ratio is the demand relative to
+default parameters, exercise level 1 and differential extraction 1. Their ratio is the demand relative to
 rest, independent of the fibre sizes (which differ between species and muscles)::
 
     ratio = Λ_tissue / Λ_rest         non-resting when ratio > cutoff (default 1.5)
@@ -140,11 +142,14 @@ class DemandResult:
 def fibre_type_factors(switches: Any) -> Dict[str, Dict[int, float]]:
     """Per fibre type, relative to type I, as ``fem.solve.compartment_coefficients``:
     ``uptake`` (M0 ratio), ``K`` (α D ratio), ``Mb`` (Mb concentration ratio)."""
+    # differential O2 extraction m (1 | 5 | 10) multiplies the type I and IIa uptake
+    # relative to IIb, as the legacy GetCompartmentIndicesAndModelParameters.m
+    de = float(getattr(switches, "differential_extraction", 1.0) or 1.0)
     if getattr(switches, "non_uniform", True):            # Popel et al. 2012, relative to IIb
-        up = {1: 2.08, 21: 1.76, 22: 1.0}
+        up = {1: de * 2.08, 21: de * 1.76, 22: 1.0}
         aD = {1: 1.0 * 2.96522, 21: 1.0 * 1.70435, 22: 1.0}
     else:
-        up = {1: 2.0, 21: 1.76, 22: 1.0}
+        up = {1: de * 2.0, 21: de * 1.76, 22: 1.0}
         aD = {1: 1.0, 21: 1.0, 22: 1.0}
     return {"uptake": {t: up[t] / up[1] for t in FIBRE_TYPES}, "K": {t: aD[t] / aD[1] for t in FIBRE_TYPES},
             "Mb": dict(MB_RELATIVE)}
@@ -213,7 +218,10 @@ def assess(geometry: Any, params: Any, switches: Any, tissue: str = "skeletal",
         kind = "skeletal"
     lam = _lambda(params, switches, kind, areas, types, tissue_cm2)
     rest_params = TransportParameters.defaults("cardiac" if tissue == "cardiac" else "skeletal")
-    rest_sw = dataclasses.replace(switches, exercise_level=1.0, michaelis_menten=False, myoglobin=False)
+    # rest: the tissue's default parameters, exercise 1 and differential extraction 1 (basal
+    # recruitment); fibre-specific properties (non-uniform) as chosen
+    rest_sw = dataclasses.replace(switches, exercise_level=1.0, michaelis_menten=False, myoglobin=False,
+                                  differential_extraction=1.0)
     lam_rest = _lambda(rest_params, rest_sw, kind, areas, types, tissue_cm2)
     if kind == "cardiac":
         lt, lr = float(lam[0]), float(lam_rest[0])
