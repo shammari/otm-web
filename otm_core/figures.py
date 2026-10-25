@@ -174,16 +174,62 @@ def save_figure(fig: Any, stem: str, style: FigureStyle, dpi: Optional[int] = No
     import matplotlib
 
     with matplotlib.rc_context(rc):
+        _bake_layers(fig, res)
         for fmt in style.formats:
             path = f"{stem}.{fmt}"
             kw: Dict[str, Any] = {"dpi": res, "facecolor": "white"}
             if fmt == "tiff":
                 kw["pil_kwargs"] = {"compression": "tiff_lzw"}
+            if fmt == "png":                             # zlib level 3: 2.4x faster than 6, files ~15 % larger
+                kw["pil_kwargs"] = {"compress_level": 3}
             if fmt == "pdf":
                 kw["metadata"] = {"Creator": "OTM Lite (Oxygen Transport Modeller)"}
             fig.savefig(path, format=fmt, **kw)
             out.append(path)
     return out
+
+
+def _bake_layers(fig: Any, dpi: int) -> None:
+    """Draw each heavy layer of ``fig`` once, as an image, before it is saved.
+
+    A field map is a Gouraud-shaded triangulation of a few hundred thousand
+    triangles: drawn at 600 dpi it takes seconds, and saving PNG and PDF drew it
+    twice (the PDF rasterises it at the same resolution). A figure lists such
+    layers in ``fig._otm_bake`` as ``(artist, draw)``: ``draw(ax)`` makes the same
+    layer in an empty axes. Here the figure is laid out at the saving resolution
+    with the layers hidden, each layer is drawn alone into an image of exactly
+    its axes' pixel size, and that image takes its place (same extent and
+    z-order) in every format. Done once per figure."""
+    layers = getattr(fig, "_otm_bake", None)
+    if not layers:
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    fig._otm_bake = []
+    fig.set_dpi(dpi)
+    for art, _draw in layers:
+        art.set_visible(False)
+    fig.canvas.draw()                                    # layout at the saving resolution, without the layers
+    for art, draw in layers:
+        ax = art.axes
+        bb = ax.get_window_extent()
+        W, H = max(1, int(round(bb.width))), max(1, int(round(bb.height)))
+        f2 = Figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+        FigureCanvasAgg(f2)
+        f2.patch.set_facecolor("white")                  # opaque: no transparency mask in the PDF
+        ax2 = f2.add_axes((0, 0, 1, 1))
+        ax2.set_axis_off()
+        draw(ax2)
+        xl, yl = ax.get_xlim(), ax.get_ylim()
+        ax2.set_xlim(xl)
+        ax2.set_ylim(yl)
+        f2.canvas.draw()
+        rgb = np.asarray(f2.canvas.buffer_rgba())[:, :, :3].copy()
+        ax.imshow(rgb, extent=(xl[0], xl[1], yl[0], yl[1]), origin="upper", interpolation="none",
+                  zorder=art.get_zorder(), aspect=ax.get_aspect())
+        ax.set_xlim(xl)
+        ax.set_ylim(yl)
 
 
 # ==========================================================================
@@ -299,6 +345,14 @@ def map_figure(solution: Any, geometry: Any, field: str = "po2", style: Optional
             v = np.asarray(vals, float)
             lo, hi = v.min() < clim[0], v.max() > clim[1]
             extend = "both" if lo and hi else "min" if lo else "max" if hi else "neither"
+
+        def _layer(ax2, field=field, vals=vals, art=art):           # the same layer, for save_figure
+            if field == "po2":
+                ax2.tripcolor(tri, vals, shading="gouraud", cmap=art.cmap, norm=art.norm)
+            else:
+                ax2.tripcolor(tri, facecolors=vals, cmap=art.cmap, norm=art.norm, edgecolors="none")
+
+        fig._otm_bake = [(art, _layer)]
         handles = []
         if tissue != "cardiac":
             rings = _fibre_rings_um(geometry)

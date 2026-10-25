@@ -3,6 +3,7 @@
   "otm_core/__init__.py",
   "otm_core/__main__.py",
   "otm_core/batch.py",
+  "otm_core/demand.py",
   "otm_core/edits.py",
   "otm_core/export.py",
   "otm_core/fem/__init__.py",

@@ -138,6 +138,17 @@
       </div>
       <p class="switch-summary" id="exercise-summary" aria-live="polite"></p>
       <p class="warn-note" id="m0-note" role="note" hidden></p>
+      <div class="demand-box">
+        <span class="label">Oxygen demand Λ</span>
+        <span class="hint small">Λ = M₀·A / (K·P<sub>cap</sub>) per fibre, K = αD + C<sub>Mb</sub>·D<sub>Mb</sub>/P<sub>50</sub>; the section's area-weighted Λ against its resting value tells resting from non-resting demand.</span>
+        <label class="check"><input type="checkbox" id="dm-enabled" checked> Let Λ adjust the model <span class="hint small">(off: legacy behaviour; Λ is still reported)</span></label>
+        <div id="dm-options" class="dm-options">
+          <label class="check"><input type="checkbox" id="dm-uptake" checked> At exercise level Resting, switch on Michaelis–Menten uptake and myoglobin when the demand is non-resting</label>
+          <label class="check"><input type="checkbox" id="dm-cap" checked> Shorten the automatic flux-line cap with demand (× √(Λ<sub>rest</sub>/Λ))</label>
+          <label class="field-row">Non-resting above <input type="number" id="dm-cutoff" min="1.01" step="any" value="1.5" class="short" aria-label="Demand cut-off"> × the resting Λ</label>
+        </div>
+        <p class="switch-summary" id="dm-estimate" aria-live="polite"></p>
+      </div>
     </fieldset>
 
     <fieldset class="wide">
@@ -151,7 +162,7 @@
         <div class="inline wrap gap-top">
           <label id="width-label">Width <select id="fig-width"></select></label>
           <span class="formats" id="formats" aria-label="File formats"></span>
-          <label>Resolution <select id="dpi"><option value="300">300 dpi</option><option value="600" selected>600 dpi</option><option value="1200">1200 dpi</option></select></label>
+          <label>Resolution <select id="dpi"><option value="300">300 dpi (quick look)</option><option value="600" selected>600 dpi (publication)</option><option value="1200">1200 dpi</option></select></label>
           <label>Colour map <select id="colormap"><option>turbo</option><option>viridis</option><option>plasma</option><option>jet</option></select></label>
         </div>
         <div class="inline wrap gap-top">
@@ -162,7 +173,7 @@
           </div>
           <span id="range-values" hidden><input type="number" id="range-lo" step="any" min="0" value="0" class="short" aria-label="Lowest PO2"> to <input type="number" id="range-hi" step="any" min="0" value="30" class="short" aria-label="Highest PO2"> mmHg</span>
         </div>
-        <p class="hint small">A fixed range puts all samples on one colour scale so they can be compared.</p>
+        <p class="hint small">A fixed range puts all samples on one colour scale so they can be compared. The numbers and the tissue view are shown as soon as a sample is solved; its figures are written afterwards. 300 dpi PNG only is the quickest for a first look.</p>
       </div>
     </fieldset>
 
@@ -195,7 +206,10 @@
           <label class="check"><input type="checkbox" id="flux-legacy"> Legacy MATLAB settings (time parametrization, seeds at 0.015)</label>
         </fieldset>
         <fieldset>
-          <legend>Session files</legend>
+          <legend>Speed and session files</legend>
+          <label class="field-row">Samples at a time <select id="parallel">
+            <option value="auto" selected>Automatic</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+          <p class="hint small">Each extra sample runs in its own copy of the engine (about 1 GB of memory each, 10–15 s to start). Automatic: 2 (3 with 8 or more cores) on computers with at least 4 cores and 8 GB, for two files or more.</p>
           <label class="check"><input type="checkbox" id="save-session" checked> Save a session (<code>.otm</code>) per sample</label>
           <p class="hint small">Opens the sample in the desktop app with its mesh, PO₂ and flux lines, without recomputing. About 9 MB each, included in the ZIP.</p>
         </fieldset>
@@ -229,7 +243,7 @@
   <p class="hint" id="results-hint">Results appear here as each sample finishes. The ZIP holds, per sample, the INDICES and PO2 folders the desktop app writes, plus the batch summary spreadsheet.</p>
   <div class="table-wrap" id="overview-wrap" hidden>
     <table class="data" id="overview">
-      <thead><tr><th>Sample</th><th>Status</th><th class="num">Capillaries</th><th class="num">LCFR</th><th class="num">Tissue PO₂ (mmHg)</th><th class="num">Hypoxic (%)</th><th class="num">Time (s)</th></tr></thead>
+      <thead><tr><th>Sample</th><th>Status</th><th class="num">Capillaries</th><th class="num">LCFR</th><th class="num" title="Oxygen demand of the section relative to rest (Λ / Λ_rest)">Λ × rest</th><th class="num">Tissue PO₂ (mmHg)</th><th class="num">Hypoxic (%)</th><th class="num">Time (s)</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -250,6 +264,7 @@
     <p class="sample-meta"></p>
     <div class="errors"></div>
     <div class="dc-result" hidden></div>
+    <p class="demand-result" hidden></p>
     <div class="block block-view">
       <div class="block-head"><h4>Tissue view</h4><div class="row-actions"><button class="ghost small save-otm" type="button" hidden>Save session (.otm)</button></div></div>
       <div class="tv-host"></div>

@@ -336,7 +336,8 @@ def parse_dimensions(text: str) -> str:
 # ----------------------------------------------------------------------------------------------
 
 VIEW_DIR = "/tmp/views"
-WEB_KEYS = ("save_session",)                  # page-only settings, not part of RunSettings
+WEB_KEYS = ("save_session", "figures_later")  # page-only settings, not part of RunSettings
+_PENDING: Dict[str, Any] = {}                 # sample -> its RunResult, until its figures are written
 
 
 def run(name: str, settings_json: str, progress: Callable[[float, str], Any], edits_json: str = "null") -> str:
@@ -354,6 +355,11 @@ def run(name: str, settings_json: str, progress: Callable[[float, str], Any], ed
     raw = json.loads(settings_json)
     save = bool(raw.get("save_session", False))
     s = RunSettings.from_dict({k: v for k, v in raw.items() if k not in WEB_KEYS})
+    # figures_later: the tables now, the figures with figures(name) afterwards (results are shown sooner)
+    later = bool(raw.get("figures_later", False)) and s.figures and s.export
+    _PENDING.pop(name, None)
+    if later:
+        s = s.with_changes(figures=False)
     path = _data_path(name)
     shutil.rmtree(os.path.join(OUT, name), ignore_errors=True)
     _drop_view(name)
@@ -394,12 +400,20 @@ def run(name: str, settings_json: str, progress: Callable[[float, str], Any], ed
     if r.mesh is not None:
         out["mesh"] = {"nodes": r.mesh.n_nodes, "triangles": r.mesh.n_triangles,
                        "mesher": (getattr(r.mesh, "info", None) or {}).get("source", "gmsh")}
+    if r.demand is not None:
+        out["demand"] = {**r.demand.summary(), "text": r.demand.text(), "enabled": r.demand.settings.enabled}
     if r.flux_lines is not None:
         sm = r.flux_lines.summary()
         out["flux"] = {"seed_capillaries": sm["n_seed_capillaries"],
                        "capillaries_with_lines": sm["n_capillaries_with_lines"],
                        "moving_lines": sm["n_moving_lines"]}
+        cap = float(getattr(r.flux_lines, "max_length", float("nan")))
+        if math.isfinite(cap) and g is not None and g.length_scale is not None:
+            out["flux"]["cap_um"] = cap * g.length_scale.y_um / 2.0
     out["files"] = sorted(os.path.relpath(f, OUT) for f in r.files)
+    out["figures_pending"] = bool(later and r.ok)
+    if out["figures_pending"]:
+        _PENDING[name] = r                        # figures(name) needs the mesh and the solution
     row = r.summary()
     row.pop("folder", None)
     _ROWS[name] = row
@@ -409,9 +423,73 @@ def run(name: str, settings_json: str, progress: Callable[[float, str], Any], ed
     return _dumps(out)
 
 
+def figures(name: str, progress: Callable[[float, str], Any]) -> str:
+    """Write the figures of a run made with ``figures_later`` (the tables are
+    written again, unchanged); returns every output file of the sample."""
+    from otm_core.pipeline import export_run
+
+    r = _PENDING.pop(name, None)
+    if r is None:
+        return _dumps({"ok": False, "error": "no run waiting for its figures"})
+    t0 = time.perf_counter()
+    try:
+        export_run(r, OUT, progress=lambda f, m: progress(float(f), "figures: " + str(m)), figures=True)
+        ok, err = True, None
+    except Exception as exc:                       # the tables are there already
+        ok, err = False, _plain_message("export", f"{type(exc).__name__}: {exc}")
+    del r
+    gc.collect()
+    root = os.path.join(OUT, name)
+    files = sorted(os.path.relpath(os.path.join(d, f), OUT) for d, _s, fs in os.walk(root) for f in fs)
+    return _dumps({"ok": ok, "error": err, "files": files, "seconds": time.perf_counter() - t0})
+
+
+# ----------------------------------------------------------------------------------------------
+# moving a finished sample between workers (samples run in parallel in several workers; the
+# first one holds every result for the ZIP)
+# ----------------------------------------------------------------------------------------------
+
+def pack(name: str) -> str:
+    """A ZIP (stored, not compressed: fast) of the sample's outputs, view and summary row."""
+    path = f"/tmp/pack_{name}.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("row.json", json.dumps(_clean(_ROWS.get(name))))
+        root = os.path.join(OUT, name)
+        for d, _s, fs in os.walk(root):
+            for f in sorted(fs):
+                full = os.path.join(d, f)
+                z.write(full, "out/" + os.path.relpath(full, OUT))
+        if os.path.exists(view_path(name)):
+            z.write(view_path(name), "view.bin")
+    return path
+
+
+def unpack(name: str, path: str) -> None:
+    """Take over a sample packed by another worker."""
+    shutil.rmtree(os.path.join(OUT, name), ignore_errors=True)
+    _drop_view(name)
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            if info.filename == "row.json":
+                row = json.loads(z.read(info))
+                if row is not None:
+                    _ROWS[name] = row
+            elif info.filename == "view.bin":
+                os.makedirs(VIEW_DIR, exist_ok=True)
+                with open(view_path(name), "wb") as fh:
+                    fh.write(z.read(info))
+            elif info.filename.startswith("out/"):
+                dest = os.path.join(OUT, info.filename[4:])
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as fh:
+                    fh.write(z.read(info))
+    os.remove(path)
+
+
 def forget(name: str) -> None:
     """Remove a sample's results (its row in the summary, its output folder and its view)."""
     _ROWS.pop(name, None)
+    _PENDING.pop(name, None)
     shutil.rmtree(os.path.join(OUT, name), ignore_errors=True)
     _drop_view(name)
 
@@ -499,6 +577,11 @@ def write_view(name: str, r: Any) -> Optional[Dict[str, Any]]:
     arrays["fib_owner"] = own
     arrays["fib_type"] = types if types.size == len(g.fibers) else np.zeros(len(g.fibers), np.int32)
     head["n_fibres"] = len(g.fibers)
+    dm = getattr(r, "demand", None)
+    if dm is not None and len(dm.lambda_fibre) == len(g.fibers) and len(g.fibers):
+        arrays["fib_lambda"] = np.asarray(dm.lambda_fibre, np.float32)      # oxygen demand Λ per fibre
+        head["lambda_range"] = [float(np.min(dm.lambda_fibre)), float(np.max(dm.lambda_fibre))]
+        head["lambda_tissue"], head["lambda_ratio"] = float(dm.lambda_tissue), float(dm.ratio)
     # capillary domains (Voronoi), clipped to the tissue
     vor = None
     if r.morphometrics is not None:

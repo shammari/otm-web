@@ -602,6 +602,7 @@ class MeshSettings:
     threads: int = 0                   # 0 = gmsh default
     backend: str = "auto"              # "gmsh" | "triangle" | "auto" (gmsh when installed, else Triangle)
     timeout_s: Optional[float] = None  # gmsh in a separate process with this time limit, one retry (None = in-process)
+    triangle_area_factor: float = 1.6  # Triangle only: area limit x this factor, about gmsh's node count (1 = before 25 Oct 2026)
 
 
 DEFAULT_MESH_TIMEOUT_S = 600.0
