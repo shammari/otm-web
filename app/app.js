@@ -1602,4 +1602,5 @@ if (typeof Worker === "undefined" || typeof WebAssembly === "undefined") {
 } else start();
 
 // for the browser test
-window.__otm = { state, engine, storeResult, selectSample, download: pyDownload, ed, openEditor, get view() { return currentView; } };
+window.__otm = { state, engine, storeResult, selectSample, download: pyDownload, ed, openEditor, addFiles, renderFiles, validate,
+  get view() { return currentView; } };
