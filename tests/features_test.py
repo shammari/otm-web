@@ -229,10 +229,22 @@ def main() -> int:
         page.uncheck("#figures")
 
         print("4b oxygen demand Λ and parallel samples")
+        page.click('label:has(input[name="tissue"][value="cardiac"])')
+        page.select_option("#exercise", "low")
+        page.dispatch_event("#exercise", "change")
+        est = page.inner_text("#dm-estimate")
+        check("5.00 × rest" in est and "Warning:" in est and "cardiac level “Low”" in est,
+              f"cardiac Low: Λ will switch MM and Mb on, with a warning ({est})")
+        page.click('label:has(input[name="tissue"][value="skeletal"])')
+        page.select_option("#exercise", "resting")
+        page.dispatch_event("#exercise", "change")
+        check(page.input_value("#preset") == "skeletal" and "1.00 × rest" in page.inner_text("#dm-estimate"),
+              "back to skeletal Resting with its defaults")
         page.fill("#p-M0", "4.71e-4")                         # 3 x the resting M0, exercise level Resting
         page.dispatch_event("#p-M0", "input")
         est = page.inner_text("#dm-estimate")
-        check("3.00 × rest" in est and "non-resting" in est and "switched on" in est, f"Λ estimate in the settings ({est})")
+        check("3.00 × rest" in est and "non-resting" in est and "Warning:" in est and "will switch them on" in est,
+              f"Λ estimate in the settings ({est})")
         page.uncheck("#dm-enabled")
         page.dispatch_event("#dm-enabled", "input")
         check("only reported" in page.inner_text("#dm-estimate") and page.is_disabled("#dm-uptake"), "legacy switch")
@@ -321,7 +333,8 @@ def main() -> int:
         time.sleep(0.3)
         check("Λ per fibre" in page.inner_text(".tv-cunit") and "3.00 × rest" in page.inner_text(".tv-cunit"),
               "Λ-per-fibre map with the section's value")
-        check("switched on" in page.inner_text(".demand-result"), "results say Λ switched MM and Mb on")
+        dmr = page.inner_text(".demand-result")
+        check("switched on" in dmr and "⚠ Warning: the oxygen demand is 3.00" in dmr, "results warn that Λ switched MM and Mb on")
         page.select_option(".tv-map", "types")
         time.sleep(0.3)
         check(page.locator(".tv-legend span").count() >= 3, "fibre-type map with a legend")

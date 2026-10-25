@@ -521,12 +521,13 @@ function updateDemand() {
   box.textContent = "";
   box.append("Demand about ", el("b", { text: `${ratio.toFixed(2)} × rest` }), `: ${non ? "non-resting" : "resting"}`);
   if (!$("#dm-enabled").checked) { box.append(" (Λ only reported)."); return; }
-  const parts = [];
-  if (non && level === "resting" && $("#dm-uptake").checked) {
-    parts.push("Michaelis–Menten uptake and myoglobin will be switched on");
+  const off = [!sw.michaelis_menten && "Michaelis–Menten uptake", !sw.myoglobin && "myoglobin facilitation"].filter(Boolean);
+  if (non && off.length && $("#dm-uptake").checked) {
+    const lvl = $("#exercise").selectedOptions[0]?.textContent || level;
+    box.append(". ", el("b", { text: "Warning:" }),
+      ` the ${tissue} level “${lvl}” solves without ${off.join(" and ")}; Λ will switch ${off.length > 1 ? "them" : "it"} on.`);
     box.classList.add("switch");
-  }
-  box.append(parts.length ? ` · ${parts.join(" · ")}.` : ".");
+  } else box.append(".");
 }
 
 function buildParamGrid() {
@@ -1194,6 +1195,7 @@ function selectSample(name) {
     dm.hidden = false;
     dm.classList.toggle("switch", !!res.demand.uptake_switched_by_lambda);
     dm.textContent = res.demand.text;
+    if (res.demand.warning) dm.append(document.createElement("br"), el("b", { text: "⚠ " }), res.demand.warning);
   }
   const otm = (res.files || []).find((p) => p.toLowerCase().endsWith(".otm"));
   const otmBtn = $(".save-otm", node);

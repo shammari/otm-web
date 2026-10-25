@@ -36,11 +36,14 @@ rest, independent of the fibre sizes (which differ between species and muscles):
 The default cut-off lies halfway between rest (1) and the lowest exercise level
 (2 for skeletal muscle). What it does (:class:`DemandSettings`):
 
-* **Uptake model.** At exercise level *Resting* the PDE has neither
-  Michaelis–Menten uptake nor myoglobin facilitation. If M0 (or Pcap, α, D ...)
-  is changed so that the section is non-resting, both are switched on for the
-  solution (``switch_uptake``); the capillary permeability is not changed.
-  Exercise levels other than Resting are left as they are.
+* **Uptake model.** Some exercise levels solve without Michaelis–Menten uptake
+  and myoglobin facilitation (skeletal Resting; cardiac Resting and Low; any
+  custom choice). If the section is non-resting at such a level (a raised M0,
+  a lower Pcap, cardiac Low ...), both are switched on for the solution
+  (``switch_uptake``) and :attr:`DemandResult.warning` says so: the program
+  shows it to the user (user's condition, 25 Oct 2026). The capillary
+  permeability is not changed. With constant uptake the PO2 deficit simply
+  scales with M0, so the flux-line paths would not respond to demand at all.
 * **Flux lines.** Λ does not change the flux-line length cap: it stays the
   resting one (1.25 × the mean capillary spacing), as the user decided on
   25 Oct 2026. Demand shortens the lines through the PO2 field itself (the
@@ -84,7 +87,7 @@ class DemandSettings:
 
     enabled: bool = True             # False: legacy, Λ only reported
     cutoff: float = 1.5              # non-resting when Λ_tissue / Λ_rest > cutoff
-    switch_uptake: bool = True       # Resting + non-resting: Michaelis–Menten and myoglobin on
+    switch_uptake: bool = True       # non-resting at a level without MM/Mb: both on (with a warning)
 
     def __post_init__(self):
         if not (isinstance(self.cutoff, (int, float)) and self.cutoff > 0):
@@ -106,9 +109,24 @@ class DemandResult:
     cutoff: float
     regime: str                          # "resting" | "non-resting"
     switches: Any                        # model switches to solve with
-    uptake_switched: bool                # MM and Mb switched on because of Λ
+    uptake_switched: bool                # MM and/or Mb switched on because of Λ (see ``warning``)
     settings: DemandSettings = field(default_factory=DemandSettings)
     domain: Optional[Dict[str, Any]] = None   # cardiac: the capillary-domain area A and how it was chosen
+    switched_on: tuple = ()              # what Λ switched on: "Michaelis–Menten uptake", "myoglobin facilitation"
+    exercise_level: float = 1.0          # the chosen level's demand factor
+    tissue: str = "skeletal"
+
+    @property
+    def warning(self) -> str:
+        """The warning to show when Λ changed the chosen uptake model ("" otherwise)."""
+        if not self.uptake_switched:
+            return ""
+        lvl = "Resting" if self.exercise_level == 1 else f"× {self.exercise_level:g}"
+        what = " and ".join(self.switched_on) or "Michaelis–Menten uptake and myoglobin facilitation"
+        return (f"Warning: the oxygen demand is {self.ratio:.2f} × the resting value (non-resting, cut-off "
+                f"{self.cutoff:g}), but the chosen {self.tissue} exercise level ({lvl}) solves without {what}. "
+                f"Λ has switched {'them' if len(self.switched_on) != 1 else 'it'} on for this solution. To keep "
+                f"the level's own model, untick “Let Λ adjust the model” (legacy) or the uptake switch.")
 
     def by_type(self) -> Dict[str, float]:
         """Area-weighted mean Λ per fibre type."""
@@ -137,7 +155,9 @@ class DemandResult:
         if not self.settings.enabled:
             return t + " (demand switches off: legacy behaviour)."
         notes = []
-        if self.uptake_switched:
+        if self.uptake_switched and len(self.switched_on) == 1:
+            notes.append(f"{self.switched_on[0]} switched on")
+        elif self.uptake_switched:
             notes.append("Michaelis–Menten uptake and myoglobin facilitation switched on")
         return t + (": " + "; ".join(notes) if notes else "") + "."
 
@@ -244,15 +264,17 @@ def assess(geometry: Any, params: Any, switches: Any, tissue: str = "skeletal",
     regime = "non-resting" if ratio > s.cutoff else "resting"
     sw = switches
     switched = False
-    if s.enabled and regime == "non-resting":
-        resting_level = (float(switches.exercise_level) == 1.0 and not switches.michaelis_menten
-                         and not switches.myoglobin)
-        if s.switch_uptake and resting_level:
+    on: tuple = ()
+    if s.enabled and s.switch_uptake and regime == "non-resting":
+        on = tuple(name for name, flag in (("Michaelis–Menten uptake", switches.michaelis_menten),
+                                           ("myoglobin facilitation", switches.myoglobin)) if not flag)
+        if on:
             sw = dataclasses.replace(switches, michaelis_menten=True, myoglobin=True)
             switched = True
     return DemandResult(lambda_fibre=lam_f, fibre_area_um2=fib_um2, fibre_type=types, lambda_tissue=lt,
                         lambda_rest=lr, ratio=ratio, cutoff=float(s.cutoff), regime=regime, switches=sw,
-                        uptake_switched=switched, settings=s, domain=domain)
+                        uptake_switched=switched, settings=s, domain=domain, switched_on=on,
+                        exercise_level=float(switches.exercise_level), tissue=kind)
 
 
 def capillary_domain_area(capillaries: Any, ls: Any) -> Dict[str, Any]:
@@ -302,6 +324,7 @@ def write_report(result: DemandResult, stem: str) -> List[str]:
     lines = ["OTM: oxygen demand of the section (Λ)", "",
              "Λ_j = M0_j · A_j / (K_j · Pcap),  K_j = α_j D_j + C_Mb,j D_Mb / P50,Mb", "",
              result.text(), "",
+             *([result.warning, ""] if result.warning else []),
              f"Λ section ({'capillary domain A' if result.domain else 'area-weighted mean over the fibres'}): "
              f"{result.lambda_tissue:.6g}",
              f"Λ at rest (tissue defaults, exercise level 1):   {result.lambda_rest:.6g}",

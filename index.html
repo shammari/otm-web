@@ -143,7 +143,7 @@
         <span class="hint small">Λ = M₀·A / (K·P<sub>cap</sub>) per fibre, K = αD + C<sub>Mb</sub>·D<sub>Mb</sub>/P<sub>50</sub> (cardiac: A = the larger of the mean and median Voronoi capillary-domain area); the section's Λ against its resting value tells resting from non-resting demand. The flux-line cap stays the resting one.</span>
         <label class="check"><input type="checkbox" id="dm-enabled" checked> Let Λ adjust the model <span class="hint small">(off: legacy behaviour; Λ is still reported)</span></label>
         <div id="dm-options" class="dm-options">
-          <label class="check"><input type="checkbox" id="dm-uptake" checked> At exercise level Resting, switch on Michaelis–Menten uptake and myoglobin when the demand is non-resting</label>
+          <label class="check"><input type="checkbox" id="dm-uptake" checked> When the demand is non-resting, switch on Michaelis–Menten uptake and myoglobin if the exercise level has them off (with a warning)</label>
           <label class="field-row">Non-resting above <input type="number" id="dm-cutoff" min="1.01" step="any" value="1.5" class="short" aria-label="Demand cut-off"> × the resting Λ</label>
         </div>
         <p class="switch-summary" id="dm-estimate" aria-live="polite"></p>

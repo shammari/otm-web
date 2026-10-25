@@ -590,6 +590,7 @@ def summary_row(res: RunResult) -> Dict[str, Any]:
         row.update({"lambda_tissue": sm["lambda_tissue"], "lambda_rest": sm["lambda_rest"],
                     "lambda_ratio": sm["lambda_ratio"], "demand_regime": sm["demand_regime"],
                     "uptake_switched_by_lambda": "yes" if sm["uptake_switched_by_lambda"] else "no",
+                    "demand_warning": dm.warning,
                     "lambda_domain_area_um2": sm.get("domain_area_um2", nan)})
     ls = g.length_scale if g is not None else None
     row.update({"width_um": ls.x_um if ls else nan, "height_um": ls.y_um if ls else nan,

@@ -401,7 +401,8 @@ def run(name: str, settings_json: str, progress: Callable[[float, str], Any], ed
         out["mesh"] = {"nodes": r.mesh.n_nodes, "triangles": r.mesh.n_triangles,
                        "mesher": (getattr(r.mesh, "info", None) or {}).get("source", "gmsh")}
     if r.demand is not None:
-        out["demand"] = {**r.demand.summary(), "text": r.demand.text(), "enabled": r.demand.settings.enabled}
+        out["demand"] = {**r.demand.summary(), "text": r.demand.text(), "enabled": r.demand.settings.enabled,
+                          "warning": r.demand.warning}
     if r.flux_lines is not None:
         sm = r.flux_lines.summary()
         out["flux"] = {"seed_capillaries": sm["n_seed_capillaries"],

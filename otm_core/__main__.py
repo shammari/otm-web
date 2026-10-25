@@ -138,7 +138,8 @@ def _line(i: int, n: int, r: RunResult) -> str:
                                                              if r.edit_warnings else ""))
     if r.files:
         parts.append(f"{len(r.files)} files")
-    return head + "\n    " + "; ".join(parts)
+    warn = r.demand.warning if r.demand is not None else ""
+    return head + "\n    " + "; ".join(parts) + (f"\n    {warn}" if warn else "")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
