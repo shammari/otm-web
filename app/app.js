@@ -526,7 +526,6 @@ function updateDemand() {
     parts.push("Michaelis–Menten uptake and myoglobin will be switched on");
     box.classList.add("switch");
   }
-  if (non && $("#dm-cap").checked) parts.push(`automatic flux-line cap × ${Math.sqrt(1 / ratio).toFixed(2)}`);
   box.append(parts.length ? ` · ${parts.join(" · ")}.` : ".");
 }
 
@@ -589,7 +588,7 @@ function settingsFromForm() {
     po2_range_mmHg: radio("range") === "fixed" ? [num($("#range-lo").value), num($("#range-hi").value)] : null,
     data_check: radio("dcheck"),
     demand: { enabled: $("#dm-enabled").checked, cutoff: num($("#dm-cutoff").value) ?? 1.5,
-              switch_uptake: $("#dm-uptake").checked, scale_flux_cap: $("#dm-cap").checked },
+              switch_uptake: $("#dm-uptake").checked },
   };
   if (state.info) Object.assign(s, advancedFromForm());
   // a fixed flux-line cap is typed in µm; the settings hold it in model units (half the tissue
@@ -710,10 +709,9 @@ function fillForm(d) {
   } else setRadio("roi", "default");
   applyRoi();
   setRadio("dcheck", d.data_check || "fix");
-  const dm = { enabled: true, cutoff: 1.5, switch_uptake: true, scale_flux_cap: true, ...(d.demand || {}) };
+  const dm = { enabled: true, cutoff: 1.5, switch_uptake: true, ...(d.demand || {}) };
   $("#dm-enabled").checked = dm.enabled !== false;
   $("#dm-uptake").checked = dm.switch_uptake !== false;
-  $("#dm-cap").checked = dm.scale_flux_cap !== false;
   $("#dm-cutoff").value = dm.cutoff;
   fillAdvanced(d);
   const tissue = d.tissue || "skeletal";
@@ -845,7 +843,7 @@ function wireSettings() {
   $("#figures").addEventListener("change", () => { applyFigureOptions(); validate(); });
   for (const id of ["#roi-x0", "#roi-x1", "#roi-y0", "#roi-y1", "#range-lo", "#range-hi", "#diff-extraction"]) $(id).addEventListener("input", validate);
   $("#exercise").addEventListener("change", validate);
-  for (const id of ["#dm-enabled", "#dm-uptake", "#dm-cap", "#dm-cutoff"]) $(id).addEventListener("input", validate);
+  for (const id of ["#dm-enabled", "#dm-uptake", "#dm-cutoff"]) $(id).addEventListener("input", validate);
   $("#preset").addEventListener("change", () => {
     const p = $("#preset").value;
     if (p !== "custom") writeParams(presetValues(p));

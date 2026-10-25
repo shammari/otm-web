@@ -241,7 +241,7 @@ def main() -> int:
         with page.expect_download() as d:
             page.click("#save-settings")
         sj = json.loads(Path(d.value.path()).read_text())
-        check(sj.get("demand") == {"enabled": True, "cutoff": 1.5, "switch_uptake": True, "scale_flux_cap": True}
+        check(sj.get("demand") == {"enabled": True, "cutoff": 1.5, "switch_uptake": True}
               and RunSettings.from_dict(sj).demand.enabled, "demand settings in the JSON, read by the batch runner")
         page.select_option("#parallel", "2")
         page.dispatch_event("#parallel", "change")
@@ -265,8 +265,8 @@ def main() -> int:
         dm = [r["demand"] for r in res.values()]
         check(all(abs(x["lambda_ratio"] - 3) < 1e-6 and x["uptake_switched_by_lambda"] and x["demand_regime"] == "non-resting"
                   for x in dm), "Λ = 3 × rest at Resting: MM and Mb switched on in both runs")
-        check(all(abs(r["flux"]["cap_um"] - 30.2 / 3 ** 0.5) < 1.5 for r in res.values()),
-              "automatic flux-line cap shortened by √(1/3) (" + ", ".join(f"{r['flux']['cap_um']:.1f} µm" for r in res.values()) + ")")
+        check(all(abs(r["flux"]["cap_um"] - 30.2) < 1.5 for r in res.values()),
+              "automatic flux-line cap stays the resting one (" + ", ".join(f"{r['flux']['cap_um']:.1f} µm" for r in res.values()) + ")")
         check(all(any(f.endswith("_Lambda.csv") for f in r["files"]) for r in res.values()), "Λ table per fibre written")
         lam_cells = [page.inner_text(f'#overview tr[data-name="{n}"] td:nth-child(5)') for n in res]
         check(lam_cells == ["3.00", "3.00"], f"Λ × rest column in the overview ({lam_cells})")

@@ -41,14 +41,22 @@ The default cut-off lies halfway between rest (1) and the lowest exercise level
   is changed so that the section is non-resting, both are switched on for the
   solution (``switch_uptake``); the capillary permeability is not changed.
   Exercise levels other than Resting are left as they are.
-* **Flux-line length.** The automatic length cap (``FluxSettings.max_length =
-  "auto"``, 1.25 × the mean capillary spacing) is multiplied by
-  ``√(Λ_rest / Λ_tissue)`` when the section is non-resting
-  (``scale_flux_cap``): the O2 penetration depth falls as 1/√demand. A fixed or
-  no cap is used as given.
+* **Flux lines.** Λ does not change the flux-line length cap: it stays the
+  resting one (1.25 × the mean capillary spacing), as the user decided on
+  25 Oct 2026. Demand shortens the lines through the PO2 field itself (the
+  minima move towards the capillaries once Michaelis–Menten uptake is on).
+  Lines always end: in arc length every step adds a fixed length up to the
+  cap, and a line stops where |grad u| < 1e-3 × the largest gradient, which
+  is where it runs into an anoxic floor (High exercise with M0 × 6 on the
+  reference section: 16 % of the nodes below 1 mmHg, all 368 lines ended, the
+  stalled ones at a median 0.11 mmHg).
 
-Cardiac muscle (capillaries only): the "fibre" is the mean capillary domain
-(tissue area / number of capillaries) with the cardiac coefficients.
+Cardiac muscle (capillaries only): the "fibre" is a capillary domain with the
+cardiac coefficients. ``A`` is the larger of the mean and the median area of
+the Voronoi capillary domains that lie wholly inside the section (domains cut
+by the section border are left out: unclipped they reach far outside the
+tissue, clipped they only return tissue area / number of capillaries). With
+fewer than 3 such domains ``A`` = tissue area / number of capillaries.
 
 ``DemandSettings(enabled=False)`` is the legacy behaviour (nothing switched,
 cap unchanged); Λ is still reported.
@@ -77,7 +85,6 @@ class DemandSettings:
     enabled: bool = True             # False: legacy, Λ only reported
     cutoff: float = 1.5              # non-resting when Λ_tissue / Λ_rest > cutoff
     switch_uptake: bool = True       # Resting + non-resting: Michaelis–Menten and myoglobin on
-    scale_flux_cap: bool = True      # non-resting: automatic flux-line cap × √(Λ_rest / Λ_tissue)
 
     def __post_init__(self):
         if not (isinstance(self.cutoff, (int, float)) and self.cutoff > 0):
@@ -93,15 +100,15 @@ class DemandResult:
     lambda_fibre: np.ndarray             # Λ_j per fibre (empty for cardiac tissue)
     fibre_area_um2: np.ndarray
     fibre_type: np.ndarray               # 1, 21, 22 (unknown counted as IIb, as the solver)
-    lambda_tissue: float                 # area-weighted mean Λ (cardiac: the mean capillary domain)
+    lambda_tissue: float                 # area-weighted mean Λ (cardiac: Λ of the capillary domain A)
     lambda_rest: float                   # the same section at the resting defaults
     ratio: float                         # lambda_tissue / lambda_rest
     cutoff: float
     regime: str                          # "resting" | "non-resting"
     switches: Any                        # model switches to solve with
     uptake_switched: bool                # MM and Mb switched on because of Λ
-    flux_cap_scale: float                # factor on the automatic flux-line cap
     settings: DemandSettings = field(default_factory=DemandSettings)
+    domain: Optional[Dict[str, Any]] = None   # cardiac: the capillary-domain area A and how it was chosen
 
     def by_type(self) -> Dict[str, float]:
         """Area-weighted mean Λ per fibre type."""
@@ -116,20 +123,22 @@ class DemandResult:
     def summary(self) -> Dict[str, Any]:
         return {"lambda_tissue": self.lambda_tissue, "lambda_rest": self.lambda_rest, "lambda_ratio": self.ratio,
                 "lambda_cutoff": self.cutoff, "demand_regime": self.regime,
-                "uptake_switched_by_lambda": self.uptake_switched, "flux_cap_scale": self.flux_cap_scale,
+                "uptake_switched_by_lambda": self.uptake_switched,
+                **({"domain_area_um2": self.domain["area_um2"], "domain_statistic": self.domain["statistic"]}
+                   if self.domain else {}),
                 **({f"lambda_{k}": v for k, v in self.by_type().items()})}
 
     def text(self) -> str:
         """One or two lines for the program and the reports."""
-        t = (f"Λ = {self.lambda_tissue:.3g} (section, area-weighted mean over the fibres; rest {self.lambda_rest:.3g}): "
+        where = (f"capillary domain A = {self.domain['area_um2']:.0f} µm², the {self.domain['statistic']} of "
+                 f"{self.domain['n_domains']} domains" if self.domain else "section, area-weighted mean over the fibres")
+        t = (f"Λ = {self.lambda_tissue:.3g} ({where}; rest {self.lambda_rest:.3g}): "
              f"{self.ratio:.2f} × the resting demand, {self.regime}")
         if not self.settings.enabled:
             return t + " (demand switches off: legacy behaviour)."
         notes = []
         if self.uptake_switched:
             notes.append("Michaelis–Menten uptake and myoglobin facilitation switched on")
-        if self.flux_cap_scale != 1.0:
-            notes.append(f"automatic flux-line cap × {self.flux_cap_scale:.2f}")
         return t + (": " + "; ".join(notes) if notes else "") + "."
 
     def table(self) -> List[Dict[str, Any]]:
@@ -202,9 +211,10 @@ def assess(geometry: Any, params: Any, switches: Any, tissue: str = "skeletal",
         raise ValueError("the tissue size is needed for Λ")
     um_per_ndim = ls.y_um / 2.0
     tissue_cm2 = ls.x_um * ls.y_um * 1e-8
+    domain = None
     if tissue == "cardiac" or not len(geometry.fibers):
-        n = max(1, len(geometry.capillaries))
-        areas = np.array([tissue_cm2 / n])
+        domain = capillary_domain_area(geometry.capillaries, ls)
+        areas = np.array([domain["area_um2"] * 1e-8])
         types = np.zeros(0, int)
         fib_um2 = np.zeros(0)
         kind = "cardiac"
@@ -234,30 +244,54 @@ def assess(geometry: Any, params: Any, switches: Any, tissue: str = "skeletal",
     regime = "non-resting" if ratio > s.cutoff else "resting"
     sw = switches
     switched = False
-    scale = 1.0
     if s.enabled and regime == "non-resting":
         resting_level = (float(switches.exercise_level) == 1.0 and not switches.michaelis_menten
                          and not switches.myoglobin)
         if s.switch_uptake and resting_level:
             sw = dataclasses.replace(switches, michaelis_menten=True, myoglobin=True)
             switched = True
-        if s.scale_flux_cap:
-            scale = math.sqrt(1.0 / ratio)
     return DemandResult(lambda_fibre=lam_f, fibre_area_um2=fib_um2, fibre_type=types, lambda_tissue=lt,
                         lambda_rest=lr, ratio=ratio, cutoff=float(s.cutoff), regime=regime, switches=sw,
-                        uptake_switched=switched, flux_cap_scale=scale, settings=s)
+                        uptake_switched=switched, settings=s, domain=domain)
 
 
-def scaled_flux_settings(flux: Any, demand: Optional[DemandResult]) -> Any:
-    """``flux`` with the automatic cap scaled for ``demand`` (unchanged otherwise)."""
-    if demand is None or demand.flux_cap_scale == 1.0 or flux is None:
-        return flux
-    if getattr(flux, "parametrization", "arc_length") != "arc_length" or flux.max_length != "auto":
-        return flux
-    return dataclasses.replace(flux, max_length_factor=flux.max_length_factor * demand.flux_cap_scale)
+def capillary_domain_area(capillaries: Any, ls: Any) -> Dict[str, Any]:
+    """Cardiac ``A`` (µm²): the larger of the mean and the median area of the Voronoi
+    capillary domains lying wholly inside the section (ndim box ±Lx/Ly × ±1).
+
+    Domains cut by the section border are left out. Fewer than 3 inside: tissue
+    area / number of capillaries (``statistic`` "tissue area / N")."""
+    caps = np.asarray(capillaries, float).reshape(-1, 2)
+    n = len(caps)
+    whole = ls.x_um * ls.y_um / max(1, n)
+    out = {"area_um2": whole, "statistic": "tissue area / N", "n_domains": 0, "n_capillaries": n,
+           "mean_um2": math.nan, "median_um2": math.nan, "tissue_over_n_um2": whole}
+    if n < 3:
+        return out
+    from .morphometry import voronoi_cells
+    import shapely
+
+    try:
+        vor = voronoi_cells(np.unique(caps, axis=0))
+    except (ValueError, RuntimeError):
+        return out
+    hx, eps = ls.x_um / ls.y_um, 1e-12
+    inside = []
+    for cell, b in zip(vor.cells, vor.bounded):
+        xy = shapely.get_coordinates(cell)
+        inside.append(bool(b) and len(xy) > 0 and bool(np.all((np.abs(xy[:, 0]) <= hx + eps)
+                                                               & (np.abs(xy[:, 1]) <= 1 + eps))))
+    inside = np.asarray(inside, bool)
+    a = vor.areas_ndim[inside] * (ls.y_um / 2.0) ** 2
+    if len(a) < 3:
+        return out
+    mean, median = float(a.mean()), float(np.median(a))
+    out.update(n_domains=int(len(a)), mean_um2=mean, median_um2=median,
+               area_um2=max(mean, median), statistic="mean" if mean >= median else "median")
+    return out
 
 
-__all__.append("scaled_flux_settings")
+__all__.append("capillary_domain_area")
 
 
 def write_report(result: DemandResult, stem: str) -> List[str]:
@@ -268,14 +302,19 @@ def write_report(result: DemandResult, stem: str) -> List[str]:
     lines = ["OTM: oxygen demand of the section (Λ)", "",
              "Λ_j = M0_j · A_j / (K_j · Pcap),  K_j = α_j D_j + C_Mb,j D_Mb / P50,Mb", "",
              result.text(), "",
-             f"Λ section (area-weighted mean over the fibres): {result.lambda_tissue:.6g}",
+             f"Λ section ({'capillary domain A' if result.domain else 'area-weighted mean over the fibres'}): "
+             f"{result.lambda_tissue:.6g}",
              f"Λ at rest (tissue defaults, exercise level 1):   {result.lambda_rest:.6g}",
              f"Ratio to rest: {result.ratio:.4f}  (cut-off {result.cutoff:g}: {result.regime})",
              f"Michaelis–Menten and myoglobin switched on by Λ: {'yes' if result.uptake_switched else 'no'}",
-             f"Factor on the automatic flux-line cap: {result.flux_cap_scale:.4f}",
              f"Demand switches: {'on' if result.settings.enabled else 'off (legacy)'}"
-             f"; uptake switch {'on' if result.settings.switch_uptake else 'off'}"
-             f"; flux-cap scaling {'on' if result.settings.scale_flux_cap else 'off'}"]
+             f"; uptake switch {'on' if result.settings.switch_uptake else 'off'}"]
+    if result.domain:
+        dm = result.domain
+        lines += ["", "Cardiac capillary domain (Voronoi domains wholly inside the section):",
+                  f"  domains used: {dm['n_domains']} of {dm['n_capillaries']} capillaries",
+                  f"  mean {dm['mean_um2']:.6g} µm², median {dm['median_um2']:.6g} µm²",
+                  f"  A = {dm['area_um2']:.6g} µm² ({dm['statistic']}); tissue area / N = {dm['tissue_over_n_um2']:.6g} µm²"]
     bt = result.by_type()
     if bt:
         lines += ["", "Area-weighted mean Λ per fibre type:"] + [f"  {k}: {v:.6g}" for k, v in bt.items()]

@@ -187,6 +187,8 @@ class RunSettings:
         if unknown:
             raise ValueError(f"unknown settings: {sorted(unknown)}")
         kw = dict(d)
+        if isinstance(kw.get("demand"), Mapping):         # withdrawn on 25 Oct 2026 (the cap stays the resting one)
+            kw["demand"] = {k: v for k, v in kw["demand"].items() if k != "scale_flux_cap"}
         for name, typ in (("retouch", RetouchSettings), ("mesh", MeshSettings), ("flux", FluxSettings),
                           ("demand", DemandSettings)):
             if isinstance(kw.get(name), Mapping):
@@ -514,9 +516,7 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
             roi = roi_capillary_index(caps, roi_idx, res.mesh.capillaries)
             if len(roi) == 0:
                 raise RuntimeError("no capillaries in the ROI")
-            from .demand import scaled_flux_settings
-
-            return flux_lines_from_solution(res.solution, roi, scaled_flux_settings(s.flux, res.demand), progress=p)
+            return flux_lines_from_solution(res.solution, roi, s.flux, progress=p)
 
         res.flux_lines = step("flux", flux)
 
@@ -590,7 +590,7 @@ def summary_row(res: RunResult) -> Dict[str, Any]:
         row.update({"lambda_tissue": sm["lambda_tissue"], "lambda_rest": sm["lambda_rest"],
                     "lambda_ratio": sm["lambda_ratio"], "demand_regime": sm["demand_regime"],
                     "uptake_switched_by_lambda": "yes" if sm["uptake_switched_by_lambda"] else "no",
-                    "flux_cap_scale": sm["flux_cap_scale"]})
+                    "lambda_domain_area_um2": sm.get("domain_area_um2", nan)})
     ls = g.length_scale if g is not None else None
     row.update({"width_um": ls.x_um if ls else nan, "height_um": ls.y_um if ls else nan,
                 "roi_x_min_um": g.roi.x_min_um if g is not None else nan,
