@@ -2,7 +2,9 @@
 
     python tests/cross_browser_test.py --browser firefox --firefox <path to firefox> --geckodriver <path>
     python tests/cross_browser_test.py --browser webkit            # WebKitGTK's WebKitWebDriver (needs a display, e.g. Xvfb)
-    python tests/cross_browser_test.py --browser chrome            # Chrome or Edge via Selenium Manager
+    python tests/cross_browser_test.py --browser chrome            # Chrome via Selenium Manager
+    python tests/cross_browser_test.py --browser edge [--edgedriver msedgedriver.exe]
+    python3 tests/cross_browser_test.py --browser safari           # macOS: run `safaridriver --enable` once first
 
 Playwright drives only its own patched browser builds, so this test uses the
 browsers' own WebDriver. It checks what depends on the engine: Python in
@@ -68,6 +70,8 @@ def driver_for(a):
         o.binary_location = a.webkit or "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/MiniBrowser"
         o.add_argument("--automation")
         return webdriver.WebKitGTK(options=o, service=Service(executable_path=a.webkitdriver or "WebKitWebDriver"))
+    if a.browser == "safari":                                   # Safari has no headless mode; a window opens
+        return webdriver.Safari()
     if a.browser == "edge":
         from selenium.webdriver.edge.service import Service
 
@@ -81,7 +85,7 @@ def driver_for(a):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--browser", choices=("firefox", "webkit", "chrome", "edge"), required=True)
+    ap.add_argument("--browser", choices=("firefox", "webkit", "chrome", "edge", "safari"), required=True)
     ap.add_argument("--firefox"), ap.add_argument("--geckodriver")
     ap.add_argument("--webkit"), ap.add_argument("--webkitdriver")
     ap.add_argument("--edgedriver", help="msedgedriver.exe (else Selenium Manager downloads one)")

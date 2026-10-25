@@ -22,7 +22,7 @@ OTM Web models oxygen transport in muscle tissue, in a web browser. It runs the 
 
 The first visit downloads about 45 MB (Python and its scientific libraries); the top-right corner shows how far it has got. The browser keeps it, so later visits (also after the site is updated) start in about 10 seconds.
 
-**Browsers:** current Chrome, Edge or Firefox on a computer. Safari 17+ should work but is not tested yet. Phones are not supported.
+**Browsers:** current Chrome, Edge or Firefox on a computer. Safari 17+ should work (its engine, WebKit, passes the automated test); Safari itself is not tested yet, see `tests/SAFARI.md`. Phones are not supported.
 
 ## Differences from the desktop app
 
