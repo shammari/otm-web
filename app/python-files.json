@@ -2,6 +2,7 @@
  "files": [
   "otm_core/__init__.py",
   "otm_core/__main__.py",
+  "otm_core/batch.py",
   "otm_core/edits.py",
   "otm_core/export.py",
   "otm_core/fem/__init__.py",
@@ -16,6 +17,8 @@
   "otm_core/morphometry.py",
   "otm_core/pipeline.py",
   "otm_core/progress.py",
+  "otm_core/qc.py",
+  "otm_core/ringfix.py",
   "otm_core/session.py",
   "otm_core/tables.py",
   "app/otm_web.py"

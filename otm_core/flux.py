@@ -283,6 +283,21 @@ class NaturalNeighbourInterpolator:
     def weights(self, x: float, y: float) -> Tuple[np.ndarray, np.ndarray]:
         """Natural neighbours (indices) and their normalised Sibson weights.
         Empty arrays outside the convex hull."""
+        try:
+            return self._weights(x, y)
+        except ZeroDivisionError:
+            # the point lies exactly on a Delaunay edge (rounding differs between
+            # processors): the Sibson weights are continuous there, so a shift far
+            # below the data's resolution gives the same value
+            span = float(np.ptp(self.points, axis=0).max()) or 1.0
+            for k in (1, 2, 3):
+                try:
+                    return self._weights(float(x) + 1e-9 * span * k, float(y) + 0.7e-9 * span * k)
+                except ZeroDivisionError:
+                    continue
+            return np.zeros(0, int), np.zeros(0)
+
+    def _weights(self, x: float, y: float) -> Tuple[np.ndarray, np.ndarray]:
         x, y = float(x), float(y)
         if not (math.isfinite(x) and math.isfinite(y)):
             return np.zeros(0, int), np.zeros(0)

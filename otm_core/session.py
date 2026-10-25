@@ -85,6 +85,7 @@ class Session:
     view: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
     edits: List[Any] = field(default_factory=list)    # otm_core.edits.Edit, applied to the ingest of ``raw``
+    data_check: Optional[Dict[str, Any]] = None       # otm_core.qc result of ``raw`` (with its decisions)
     # filled in by load_session
     morphometrics: Any = None
     ingest: Any = None                                # with the edits applied
@@ -229,6 +230,10 @@ def save_session(path: str, s: Session, progress: Optional[ProgressCallback] = N
     _pack_rings("raw_fibers", list(raw.fibers_px), A)
     if raw.fiber_types is not None:
         A["raw_fiber_types"] = np.asarray(raw.fiber_types, np.int64)
+    for k in ("fiber_ids", "capillary_ids"):                 # numbering in the file, after data-check removals
+        v = getattr(raw, k, None)
+        if v is not None:
+            A[f"raw_{k}"] = np.asarray(v, np.int64)
     stored: List[str] = []
     g = s.geometry
     if g is not None:
@@ -273,6 +278,7 @@ def save_session(path: str, s: Session, progress: Optional[ProgressCallback] = N
                 "n_capillaries": int(len(raw.capillaries_px)), "n_fibres": int(len(raw.fibers_px)),
                 "notes": list(getattr(raw, "notes", []))},
         "edits": [e.to_dict() for e in s.edits],
+        "data_check": _json_safe(s.data_check),
         "tissue": s.tissue, "use_fibre_types": bool(s.use_fibre_types),
         "retouch_settings": _dc(s.retouch_settings),
         "length_scale": None if s.length_scale is None else [s.length_scale.x_um, s.length_scale.y_um],
@@ -368,7 +374,8 @@ def load_session(path: str, compute_indices: bool = True, rebuild_preview: bool 
     src = meta.get("source", {})
     raw = DtectData(capillaries_px=a["raw_capillaries_px"], fibers_px=_unpack_rings("raw_fibers", a),
                     fiber_types=a.get("raw_fiber_types"), image_size=tuple(meta["raw"]["image_size"]),
-                    path=src.get("path", ""), notes=list(meta["raw"].get("notes", [])))
+                    path=src.get("path", ""), notes=list(meta["raw"].get("notes", [])),
+                    fiber_ids=a.get("raw_fiber_ids"), capillary_ids=a.get("raw_capillary_ids"))
     tissue = meta.get("tissue", "skeletal")
     s = Session(raw=raw, source_path=src.get("path", ""), tissue=tissue,
                 use_fibre_types=bool(meta.get("use_fibre_types", True)),
@@ -380,7 +387,8 @@ def load_session(path: str, compute_indices: bool = True, rebuild_preview: bool 
                 mesh_settings=_from_dc(MeshSettings, meta.get("mesh_settings")),
                 flux_settings=_from_dc(FluxSettings, meta.get("flux_settings")),
                 index_seed=meta.get("index_seed"), has_indices=bool(meta.get("has_indices")),
-                view=dict(meta.get("view") or {}), notes=meta.get("notes", ""), info=meta)
+                view=dict(meta.get("view") or {}), notes=meta.get("notes", ""), info=meta,
+                data_check=meta.get("data_check"))
     if src.get("path") and os.path.isfile(src["path"]) and src.get("size") is not None \
             and os.path.getsize(src["path"]) != src["size"]:
         warnings.append(f"The data file {src.get('name')} has changed since the session was saved; "

@@ -91,7 +91,7 @@ from .morphometry import (
     voronoi_cells,
 )
 
-__version__ = "0.1.0"
+__version__ = "2026.1.0"
 __all__ = [
     "CapillaryDomainStats",
     "FIBER_TYPE_I",

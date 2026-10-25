@@ -20,15 +20,19 @@ Requirements: gmsh (meshing only), scikit-fem, scipy, shapely.
 
 from .mesh import (
     COMPARTMENT_IS,
+    DEFAULT_MESH_TIMEOUT_S,
     IS_REGION,
     MeshSettings,
+    MeshTimeout,
     ModelGeometry,
     RegionPlan,
     TissueMesh,
     build_tissue_mesh,
+    default_mesh_settings,
     mesh_tissue,
     plan_regions,
     prepare_model_geometry,
+    repair_fibre_outlines,
 )
 from .solve import (
     CompartmentCoefficients,
@@ -48,7 +52,8 @@ from .solve import (
 
 __all__ = [
     "COMPARTMENT_IS", "IS_REGION", "MeshSettings", "ModelGeometry", "RegionPlan", "TissueMesh",
-    "build_tissue_mesh", "mesh_tissue", "plan_regions", "prepare_model_geometry",
+    "build_tissue_mesh", "default_mesh_settings", "mesh_tissue", "MeshTimeout",
+    "DEFAULT_MESH_TIMEOUT_S", "repair_fibre_outlines", "plan_regions", "prepare_model_geometry",
     "CompartmentCoefficients", "DerivedParameters", "ModelSwitches", "NewtonSettings", "PO2Solution",
     "TransportParameters", "compartment_coefficients", "fiber_po2_statistics", "matlab_f4",
     "matlab_num2str", "mo2_statistics", "po2_statistics", "solve_po2",

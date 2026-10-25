@@ -54,9 +54,9 @@ SETTINGS_FILE = "OTM_batch_settings.json"
 
 
 def _mesh_settings_default():
-    from .fem import MeshSettings
+    from .fem import default_mesh_settings
 
-    return MeshSettings()
+    return default_mesh_settings()
 
 
 def _flux_settings_default():
@@ -74,6 +74,8 @@ class RunSettings:
     width_um: Optional[float] = None               # give the width *or* the height
     height_um: Optional[float] = None
     roi_um: Optional[Tuple[float, float, float, float]] = None   # None: 20-80 % of each side
+    roi_fraction: Optional[Tuple[float, float, float, float]] = None   # ROI as shares of the width / height
+                                                                  # (batch: the same part of every section)
     retouch: RetouchSettings = field(default_factory=RetouchSettings)
     parameters: Optional[Dict[str, float]] = None  # TransportParameters fields; None: tissue defaults
     parameter_file: Optional[str] = None           # legacy .dat (overrides ``parameters``)
@@ -92,6 +94,8 @@ class RunSettings:
     figure_width: str = "double"                   # "single" (85 mm) | "onehalf" (114 mm) | "double" (175 mm)
     figure_formats: Tuple[str, ...] = ("png", "pdf")
     po2_range_mmHg: Optional[Tuple[float, float]] = None
+    data_check: str = "fix"                        # segmentation errors: "fix" (remove the flagged items),
+                                                   # "skip" (do not analyse the file), "keep" (where allowed)
 
     def __post_init__(self):
         if self.tissue not in ("skeletal", "cardiac"):
@@ -103,6 +107,8 @@ class RunSettings:
         bad = set(self.steps) - set(STEPS)
         if bad:
             raise ValueError(f"unknown steps {sorted(bad)}; choose from {STEPS}")
+        if self.data_check not in ("fix", "skip", "keep"):
+            raise ValueError("data_check must be 'fix', 'skip' or 'keep'")
         if "flux" in self.steps and "po2" not in self.steps:
             self.steps = tuple(s for s in STEPS if s in self.steps or s == "po2")
         if self.width_um is not None and self.height_um is not None:
@@ -112,6 +118,11 @@ class RunSettings:
                 raise ValueError("the tissue size must be positive")
         self.figure_formats = tuple(self.figure_formats)
         self.figure_style()                                      # validates layout, width and formats
+        if self.roi_fraction is not None:
+            f = tuple(float(v) for v in self.roi_fraction)
+            if len(f) != 4 or not (0 <= f[0] < f[1] <= 1 and 0 <= f[2] < f[3] <= 1):
+                raise ValueError("roi_fraction must be (x_min, x_max, y_min, y_max) shares between 0 and 1")
+            self.roi_fraction = f
         if self.roi_um is not None:
             r = tuple(float(v) for v in self.roi_um)
             if len(r) != 4 or not (r[0] < r[1] and r[2] < r[3]):
@@ -171,7 +182,7 @@ class RunSettings:
         for name, typ in (("retouch", RetouchSettings), ("mesh", MeshSettings), ("flux", FluxSettings)):
             if isinstance(kw.get(name), Mapping):
                 kw[name] = _dataclass_from(typ, kw[name])
-        for name in ("roi_um", "po2_range_mmHg", "steps", "figure_formats"):
+        for name in ("roi_um", "roi_fraction", "po2_range_mmHg", "steps", "figure_formats"):
             if kw.get(name) is not None:
                 kw[name] = tuple(kw[name])
         return cls(**kw)
@@ -222,6 +233,7 @@ class RunResult:
     timings: Dict[str, float] = field(default_factory=dict)
     errors: Dict[str, str] = field(default_factory=dict)
     details: Dict[str, str] = field(default_factory=dict)      # step -> traceback
+    data_check: Optional[Dict[str, Any]] = None                 # otm_core.qc result (with what was done)
 
     @property
     def ok(self) -> bool:
@@ -242,7 +254,8 @@ class RunResult:
                        switches=s.switches(), mesh_settings=s.mesh, flux_settings=s.flux, index_seed=s.index_seed,
                        geometry=g, has_indices=self.morphometrics is not None, mesh=self.mesh, model=self.model,
                        solution=self.solution, flux_lines=self.flux_lines,
-                       view={"colormap": s.colormap, "po2_range_mmHg": s.po2_range_mmHg}, edits=list(self.edits))
+                       view={"colormap": s.colormap, "po2_range_mmHg": s.po2_range_mmHg}, edits=list(self.edits),
+                       data_check=self.data_check)
 
     def light(self) -> "RunResult":
         """Copy without the large arrays (what a worker process sends back);
@@ -256,7 +269,8 @@ class _Light(RunResult):
     def __init__(self, r: RunResult):
         super().__init__(path=r.path, settings=r.settings, base_name=r.base_name, files=list(r.files),
                          edits=list(r.edits), edit_warnings=list(r.edit_warnings),
-                         timings=dict(r.timings), errors=dict(r.errors), details=dict(r.details))
+                         timings=dict(r.timings), errors=dict(r.errors), details=dict(r.details),
+                         data_check=r.data_check)
         self._row = summary_row(r)
 
     def summary(self) -> Dict[str, Any]:
@@ -321,8 +335,35 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
 
     # ---- load + ingest
     def load(_p):
-        data = load_dtect_mat(path)
+        from . import qc
+
+        try:
+            data = load_dtect_mat(path)
+        except ValueError as exc:
+            if "not a Dtect export" in str(exc):                   # no Xcap / ImageSize
+                res.data_check = qc.not_dtect(path, str(exc), s.tissue, s.use_fibre_types)
+            raise
         res.raw = data
+        check = qc.check(data, tissue=s.tissue, use_fibre_types=s.use_fibre_types)
+        res.data_check = check
+        if check["status"] == "fatal":
+            raise ValueError("data check: " + "; ".join(f"{i['code']} {i['message']}" for i in check["issues"]
+                                                        if i["severity"] == "fatal"))
+        blocking, can_keep = qc.is_blocking(check)
+        if blocking:
+            codes = ", ".join(i["code"] for i in check["issues"] if i["severity"] == "error")
+            if s.data_check == "skip":
+                raise ValueError(f"data check found segmentation errors ({codes}): file not analysed; "
+                                 "re-segment it in Dtect")
+            if s.data_check == "keep" and can_keep:
+                check = qc.override(check, "kept (batch setting)")
+            else:
+                data, act = qc.apply_fixes(data, check)
+                check = qc.check(data, tissue=s.tissue, use_fibre_types=s.use_fibre_types, previous=check, action=act)
+                if qc.is_blocking(check)[0]:
+                    raise ValueError(f"data check: errors remain after removing the flagged items "
+                                     f"({qc.text(check, 'line')})")
+            res.raw, res.data_check = data, check
         skeletal = s.tissue == "skeletal"
         fibres = data.fibers_px if skeletal else []
         types = data.fiber_types if (skeletal and s.use_fibre_types) else None
@@ -354,7 +395,13 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
             raise ValueError("tissue size missing: give the width or height in µm (--width/--height or --dims)")
         ls = (LengthScale.from_width(float(s.width_um), ing.frame) if s.width_um is not None
               else LengthScale.from_height(float(s.height_um), ing.frame))
-        roi = ROI(*s.roi_um) if s.roi_um is not None else ROI.default(ls)
+        if s.roi_um is not None:
+            roi = ROI(*s.roi_um)
+        elif s.roi_fraction is not None:
+            f = s.roi_fraction
+            roi = ROI(f[0] * ls.x_um, f[1] * ls.x_um, f[2] * ls.y_um, f[3] * ls.y_um)
+        else:
+            roi = ROI.default(ls)
         if not (0 <= roi.x_min_um < roi.x_max_um <= ls.x_um + 1e-9 and 0 <= roi.y_min_um < roi.y_max_um
                 <= ls.y_um + 1e-9):
             raise ValueError(f"the ROI must lie inside the tissue (0-{ls.x_um:g} x 0-{ls.y_um:g} µm)")
@@ -426,6 +473,12 @@ def run_file(path: str, settings: Optional[RunSettings] = None, out_dir: Optiona
                 files += ex.export_po2(res.solution, g, po2_dir, res.base_name, s.tissue,
                                        getattr(res.model, "fiber_index", None), s.figures, s.colormap,
                                        s.po2_range_mmHg, s.dpi, progress=scaled(p, 0.45, 0.9), style=fs)
+            dc = res.data_check
+            if dc and (dc.get("issues") or dc.get("fixed_issues")):
+                from . import qc
+
+                folder = ind_dir if res.morphometrics is not None or res.solution is None else po2_dir
+                files += qc.write_report(dc, os.path.join(folder, res.base_name + "_data_check"), res.raw)
             if res.flux_lines is not None:
                 vor = res.morphometrics.domains.voronoi if res.morphometrics is not None else None
                 files += ex.export_flux(res.flux_lines, g, res.mesh, po2_dir, res.base_name, vor,
@@ -482,6 +535,16 @@ def summary_row(res: RunResult) -> Dict[str, Any]:
     s = res.settings
     row.update({"tissue": s.tissue, "exercise": s.exercise, "corrections": len(res.edits),
                 "corrections_skipped": len(res.edit_warnings)})
+    dc = res.data_check
+    if dc is not None:
+        from . import qc
+
+        found = list(dc.get("fixed_issues", [])) + list(dc.get("issues", []))
+        row.update({"data_check": ("passed" if not found else
+                                   "fixed" if dc.get("fixed_issues") and dc["status"] in ("ok", "warning") else
+                                   "kept" if dc.get("overridden") else dc["status"]),
+                    "data_check_problems": "; ".join(f"{i['code']} x{max(1, len(i['items']))}" for i in found),
+                    "data_check_actions": " | ".join(a["text"] for a in dc.get("actions", []))})
     ls = g.length_scale if g is not None else None
     row.update({"width_um": ls.x_um if ls else nan, "height_um": ls.y_um if ls else nan,
                 "roi_x_min_um": g.roi.x_min_um if g is not None else nan,
